@@ -1139,14 +1139,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           initMainsByRank.set(rNum, mMap);
         }
 
-        const getCorrespInit = (r1Id: number, ownerAddr: string, targetR: number): number => {
+        const getCorrespInit = (r1Id: number, _ownerAddr: string, targetR: number): number => {
           if (targetR === 1) return r1Id;
           if (r1Id === 1) return 1;
-          const ok = ownerAddr.toLowerCase();
           const targetSnapMap = multiRankSnapshots.get(targetR);
           if (!targetSnapMap) return 0;
           const matched = Array.from(targetSnapMap.values()).find(
-            (sn) => !sn.isClone && !sn.isExtraId && (sn.originMainId === r1Id || (sn.id === r1Id && sn.owner.toLowerCase() === ok))
+            (sn) => !sn.isClone && !sn.isExtraId && sn.originMainId === r1Id
           );
           return matched ? matched.id : 0;
         };
@@ -1663,37 +1662,40 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         ownerMainsByRank.set(r, buildOwnerMainNodesInRank(r));
       }
 
-      // Check if a specific Main ID in rank `r` has unlocked `r + 1`
-      const hasMainIdUnlockedNextRankIn = (r: number, mainIdInR: number, ownerAddr: string): boolean => {
-        if (mainIdInR === 1) return true;
-        const nextSnap = multiRankSnapshots.get(r + 1);
-        if (!nextSnap) return false;
-        const oKey = ownerAddr.toLowerCase();
-        const mainsInR = ownerMainsByRank.get(r)?.get(oKey) || [];
-        const mainsInNext = ownerMainsByRank.get(r + 1)?.get(oKey) || [];
-        const idxInR = mainsInR.indexOf(mainIdInR);
-        if (idxInR >= 0 && idxInR < mainsInNext.length) {
-          return true;
-        }
-        return false;
-      };
-
       // Map a Main ID in `sourceRank` to its corresponding Main ID in target rank `targetR`
       const getCorrespondingMainIdInRank = (
         sourceRank: number,
         sourceMainId: number,
-        ownerAddr: string,
+        _ownerAddr: string,
         targetR: number
       ): number => {
         if (sourceRank === targetR) return sourceMainId;
         if (sourceMainId === 1) return 1;
-        const oKey = ownerAddr.toLowerCase();
+
+        let r1Id = sourceMainId;
+        if (sourceRank > 1) {
+          const srcNode = multiRankSnapshots.get(sourceRank)?.get(sourceMainId);
+          if (srcNode && srcNode.originMainId > 0) {
+            r1Id = srcNode.originMainId;
+          } else if (sourceRank === activeRank && onChainOriginMap.has(sourceMainId)) {
+            r1Id = onChainOriginMap.get(sourceMainId)!;
+          }
+        }
+
+        if (targetR === 1) return r1Id;
+
         const targetSnap = multiRankSnapshots.get(targetR);
         if (!targetSnap) return 0;
         const matched = Array.from(targetSnap.values()).find(
-          (sn) => !sn.isClone && !sn.isExtraId && (sn.originMainId === sourceMainId || (sn.id === sourceMainId && sn.owner.toLowerCase() === oKey))
+          (sn) => !sn.isClone && !sn.isExtraId && sn.originMainId === r1Id
         );
         return matched ? matched.id : 0;
+      };
+
+      // Check if a specific Main ID in rank `r` has unlocked `r + 1`
+      const hasMainIdUnlockedNextRankIn = (r: number, mainIdInR: number, ownerAddr: string): boolean => {
+        if (mainIdInR === 1) return true;
+        return getCorrespondingMainIdInRank(r, mainIdInR, ownerAddr, r + 1) > 0;
       };
 
       // คำนวณสถานะ Rank ปัจจุบันของ Idหลักนั้นๆ (โดยอ้างอิงจาก Rank 1 Main ID `r1MainId` เท่านั้น แยกอิสระรายรหัสหลัก)
@@ -2538,6 +2540,29 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
+        // Map local `originMainId` in `activeRank` to its primary Rank 1 Main ID (`r1MainId`) first
+        const originNodeInActive = rawNodes.get(originMainId);
+        const isExtraOrigin = Boolean(n.isExtraId || originNodeInActive?.isExtraId);
+        const extraMainLabel = isExtraOrigin
+          ? `Extra R${activeRank}-#${originMainId}`
+          : undefined;
+        let r1MainId: number | undefined = isExtraOrigin ? undefined : originMainId;
+        if (activeRank > 1 && !isExtraOrigin) {
+          if (originMainId === 1) {
+            r1MainId = 1;
+          } else {
+            const directOnChainR1 = onChainOriginMap.get(originMainId) || onChainOriginMap.get(n.id) || 0;
+            if (directOnChainR1 > 0) {
+              r1MainId = directOnChainR1;
+            } else {
+              const mappedR1 = getCorrespondingMainIdInRank(activeRank, originMainId, n.owner, 1);
+              if (mappedR1 > 0) {
+                r1MainId = mappedR1;
+              }
+            }
+          }
+        }
+
         let directUplineNodeId = 0;
         if (n.owner && n.owner.toLowerCase() === rootOwnerKey) {
           directUplineNodeId = 0;
@@ -2557,12 +2582,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             }
           }
         } else if (activeRank > 1 && !n.isExtraId) {
-          // ผู้แนะนำใน Rank 2-27 ห้ามเปลี่ยนเด็ดขาด! ยึดตามผู้แนะนำเดิมจาก Rank 1 เสมอ
+          // ผู้แนะนำใน Rank 2-27 ยึดตามผู้แนะนำเดิมของรหัสหลักนั้นจาก Rank 1 เสมอ
           let r1FoundSponsor = 0;
           if (snap1) {
-            const userR1 = Array.from(snap1.values()).find(
-              (sn) => sn.owner.toLowerCase() === n.owner.toLowerCase() && !sn.isClone && !sn.isExtraId
-            );
+            const userR1 =
+              (r1MainId ? snap1.get(r1MainId) : undefined) ||
+              Array.from(snap1.values()).find(
+                (sn) => sn.owner.toLowerCase() === n.owner.toLowerCase() && !sn.isClone && !sn.isExtraId
+              );
             if (userR1) {
               if (userR1.directSponsorNodeId && userR1.directSponsorNodeId > 0) {
                 r1FoundSponsor = userR1.directSponsorNodeId;
@@ -2572,12 +2599,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 );
                 if (spR1) r1FoundSponsor = spR1.id;
               }
-            }
-            if (r1FoundSponsor === 0 && n.directSponsor && n.directSponsor !== ethers.ZeroAddress) {
-              const spR1 = Array.from(snap1.values()).find(
-                (sn) => sn.owner.toLowerCase() === n.directSponsor.toLowerCase() && !sn.isClone && !sn.isExtraId
-              );
-              if (spR1) r1FoundSponsor = spR1.id;
             }
           }
           if (r1FoundSponsor > 0) {
@@ -2591,37 +2612,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
         const hasLeftChild = n.leftChild > 0;
         const vaultBalance = hasLeftChild ? vaultUnit : 0;
-
-        // Map local `originMainId` in `activeRank` to its primary Rank 1 Main ID (`r1MainId`)
-        // สำหรับ Auto Extra ID (และโคลนที่แตกจาก Extra ID) ให้ใช้รหัสหลักอิสระเฉพาะของผังนั้น (Extra R{rank}-#{id}) และตั้ง r1MainId = undefined เพื่อไม่ให้ซ้ำกับรหัสหลักใน Rank 1 เด็ดขาด
-        const originNodeInActive = rawNodes.get(originMainId);
-        const isExtraOrigin = Boolean(n.isExtraId || originNodeInActive?.isExtraId);
-        const extraMainLabel = isExtraOrigin
-          ? `Extra R${activeRank}-#${originMainId}`
-          : undefined;
-        let r1MainId: number | undefined = isExtraOrigin ? undefined : originMainId;
-        if (activeRank > 1 && !isExtraOrigin) {
-          if (originMainId === 1) {
-            r1MainId = 1;
-          } else {
-            const mappedR1 = getCorrespondingMainIdInRank(activeRank, originMainId, n.owner, 1);
-            if (mappedR1 > 0) {
-              r1MainId = mappedR1;
-            } else if (snap1) {
-              const r1Nodes = Array.from(snap1.values())
-                .filter(
-                  (sn) =>
-                    sn.owner.toLowerCase() === n.owner.toLowerCase() &&
-                    !sn.isClone &&
-                    !sn.isExtraId
-                )
-                .sort((a, b) => a.id - b.id);
-              if (r1Nodes.length > 0) {
-                r1MainId = r1Nodes[0].id;
-              }
-            }
-          }
-        }
 
         enrichedMap.set(n.id, {
           id: n.id,

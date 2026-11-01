@@ -1157,13 +1157,10 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
 
     const getCorrespMainInRank = (targetRank: number): IndexedTreeNode | undefined => {
       const rList = matrixDB.nodesByRank[targetRank] || [];
-      if (r1Main.id === 1) {
-        return rList.find((n) => n.id === 1);
+      if (targetRank === 1 || r1Main.id === 1) {
+        return rList.find((n) => n.id === r1Main.id);
       }
-      const ownerMainsInR = rList
-        .filter((n) => (n.owner || '').toLowerCase() === ownerKey && !n.isClone && !n.isExtraId)
-        .sort((a, b) => a.id - b.id);
-      return ownerMainsInR[mainIdx];
+      return rList.find((n) => !n.isClone && !n.isExtraId && n.originMainId === r1Main.id);
     };
 
     let currentRank = r1Main.id === 1 ? 27 : 1;
@@ -3136,11 +3133,7 @@ async function startApp() {
         vaultsByRank[1] = Number(targetNode?.nodeVault || 0);
       } else {
         const correspondingNode = rNodes.find(
-          (n) =>
-            !n.isClone &&
-            !n.isExtraId &&
-            (n.originMainId === mainIdNum ||
-              (n.id === mainIdNum && n.owner.toLowerCase() === ownerAddr))
+          (n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum
         );
         if (correspondingNode) {
           currentRank = Math.max(currentRank, r);
@@ -3181,13 +3174,7 @@ async function startApp() {
       const correspondingNode =
         r === 1
           ? targetNode
-          : rNodes.find(
-              (n) =>
-                !n.isClone &&
-                !n.isExtraId &&
-                (n.originMainId === mainIdNum ||
-                  (n.id === mainIdNum && n.owner.toLowerCase() === ownerAddr))
-            );
+          : rNodes.find((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum);
       const correspIdInR = correspondingNode?.id || 0;
       if (correspIdInR > 0) {
         const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 10) * 0.35).toFixed(4));
