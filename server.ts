@@ -1041,6 +1041,8 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
       );
 
       if (!sponsorNodeInRankBefore) {
+        const curParent = byId.get(n.parentId);
+        if (curParent && !curParent.isClone) continue;
         // ผู้แนะนำตรงยังไม่มีโหนดใน Rank นี้ ณ เวลาที่โหนดนี้ถูกสร้าง -> หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา
         const queue: number[] = [1];
         const visited = new Set<number>();
@@ -1092,6 +1094,176 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
           } else {
             shallowParent.rightChild = n.id;
           }
+        }
+      }
+    }
+
+    // สำหรับการวางตำแหน่ง Auto Extra ID ใน Rank 2-27:
+    // จะต้องไปต่อติดผู้แนะนำ Direct Sponsor เท่านั้น ถ้าไอดีผู้แนะนำ Direct Sponsor เต็ม ก็ไปหาไอดีโคลนนิ่งของผู้แนะนำ Direct Sponsor เท่านั้น
+    const removedFalseCloneIds = new Set<number>();
+    for (const n of nodes) {
+      if (n.id <= 1 || !n.isExtraId || n.isSyntheticExtra || removedFalseCloneIds.has(n.id)) continue;
+
+      const spMainId = n.directSponsorNodeId > 0 ? n.directSponsorNodeId : 1;
+      const spNodeInRank = nodes.find(
+        (prev) =>
+          prev.id < n.id &&
+          !prev.isClone &&
+          !prev.isExtraId &&
+          !removedFalseCloneIds.has(prev.id) &&
+          (spMainId === 1 ? prev.id === 1 : prev.originMainId === spMainId)
+      );
+      if (!spNodeInRank) continue;
+
+      const spOrigTag = spNodeInRank.originMainId || spNodeInRank.id;
+      const curParent = byId.get(n.parentId);
+      const isAlreadyUnderSpOrSpClone =
+        curParent &&
+        (curParent.id === spNodeInRank.id ||
+          (curParent.isClone &&
+            ((curParent.originMainId || curParent.id) === spNodeInRank.id ||
+              (curParent.originMainId || curParent.id) === spOrigTag)));
+
+      if (!isAlreadyUnderSpOrSpClone) {
+        let targetParentId = 0;
+        let targetIsLeft = true;
+
+        const spHasLeftBefore =
+          spNodeInRank.leftChild > 0 &&
+          spNodeInRank.leftChild < n.id &&
+          byId.has(spNodeInRank.leftChild);
+        const spHasRightBefore =
+          spNodeInRank.rightChild > 0 &&
+          spNodeInRank.rightChild < n.id &&
+          byId.has(spNodeInRank.rightChild);
+
+        if (!spHasLeftBefore) {
+          targetParentId = spNodeInRank.id;
+          targetIsLeft = true;
+        } else if (!spHasRightBefore) {
+          targetParentId = spNodeInRank.id;
+          targetIsLeft = false;
+        } else {
+          for (const cand of nodes) {
+            if (cand.id >= n.id || !cand.isClone || removedFalseCloneIds.has(cand.id)) continue;
+            const cOrig = cand.originMainId || cand.id;
+            if (cOrig !== spNodeInRank.id && cOrig !== spOrigTag) continue;
+
+            const cHasLeftBefore =
+              cand.leftChild > 0 && cand.leftChild < n.id && byId.has(cand.leftChild);
+            if (!cHasLeftBefore) {
+              targetParentId = cand.id;
+              targetIsLeft = true;
+              break;
+            }
+            const cHasRightBefore =
+              cand.rightChild > 0 && cand.rightChild < n.id && byId.has(cand.rightChild);
+            if (!cHasRightBefore) {
+              targetParentId = cand.id;
+              targetIsLeft = false;
+              break;
+            }
+          }
+        }
+
+        const targetParent = targetParentId > 0 ? byId.get(targetParentId) : undefined;
+        if (targetParent && n.parentId !== targetParent.id) {
+          const oldParent = byId.get(n.parentId);
+          if (oldParent) {
+            if (oldParent.leftChild === n.id) oldParent.leftChild = 0;
+            if (oldParent.rightChild === n.id) oldParent.rightChild = 0;
+          }
+
+          const displacedId = targetIsLeft ? targetParent.leftChild : targetParent.rightChild;
+          if (displacedId > 0 && displacedId !== n.id && byId.has(displacedId)) {
+            const displacedNode = byId.get(displacedId)!;
+            const oldOrig = oldParent ? oldParent.originMainId || oldParent.id : 0;
+            const dispOrig = displacedNode.originMainId || displacedNode.id;
+            const hasChildren = nodes.some(
+              (c) =>
+                c.id !== displacedNode.id &&
+                !c.isSyntheticExtra &&
+                !removedFalseCloneIds.has(c.id) &&
+                c.parentId === displacedNode.id
+            );
+
+            if (
+              displacedNode.isClone &&
+              oldOrig > 0 &&
+              dispOrig === oldOrig &&
+              (!oldParent?.rightChild || oldParent.rightChild === 0) &&
+              !hasChildren
+            ) {
+              removedFalseCloneIds.add(displacedNode.id);
+              byId.delete(displacedNode.id);
+              if (targetIsLeft) targetParent.leftChild = 0;
+              else targetParent.rightChild = 0;
+            } else if (!targetParent.rightChild || !byId.has(targetParent.rightChild)) {
+              targetParent.rightChild = displacedNode.id;
+              displacedNode.parentId = targetParent.id;
+            }
+          }
+
+          n.parentId = targetParent.id;
+          if (targetIsLeft) {
+            targetParent.leftChild = n.id;
+          } else {
+            targetParent.rightChild = n.id;
+          }
+        }
+      }
+    }
+
+    // Remove any remaining false clone whose originMainId has 0 filled rightChild slots in this rank
+    for (const c of nodes) {
+      if (!c.isClone || removedFalseCloneIds.has(c.id)) continue;
+      const origId = c.originMainId || c.id;
+      const hasAnyRightTrigger = nodes.some(
+        (m) =>
+          !removedFalseCloneIds.has(m.id) &&
+          (m.id === origId || (m.isClone && (m.originMainId || m.id) === origId)) &&
+          m.rightChild > 0 &&
+          byId.has(m.rightChild)
+      );
+      const hasChildren = nodes.some(
+        (ch) =>
+          ch.id !== c.id &&
+          !ch.isSyntheticExtra &&
+          !removedFalseCloneIds.has(ch.id) &&
+          ch.parentId === c.id
+      );
+      if (!hasAnyRightTrigger && !hasChildren) {
+        removedFalseCloneIds.add(c.id);
+        byId.delete(c.id);
+        const p = byId.get(c.parentId);
+        if (p) {
+          if (p.leftChild === c.id) {
+            if (p.rightChild > 0 && byId.has(p.rightChild)) {
+              p.leftChild = p.rightChild;
+              p.rightChild = 0;
+            } else {
+              p.leftChild = 0;
+            }
+          } else if (p.rightChild === c.id) {
+            p.rightChild = 0;
+          }
+        }
+      }
+    }
+
+    if (removedFalseCloneIds.size > 0) {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (removedFalseCloneIds.has(nodes[i].id)) {
+          nodes.splice(i, 1);
+        }
+      }
+      const recountByOrigin = new Map<number, number>();
+      for (const n of nodes) {
+        if (n.isClone) {
+          const origId = n.originMainId > 0 ? n.originMainId : n.id;
+          const cnt = (recountByOrigin.get(origId) || 0) + 1;
+          recountByOrigin.set(origId, cnt);
+          n.cloneRound = ((cnt - 1) % 2) + 1;
         }
       }
     }
@@ -1151,11 +1323,7 @@ function findExtraIdPlacementInRankNodes(
   const isSponsorClone = (cand: IndexedTreeNode) => {
     if (!cand.isClone) return false;
     const candOrig = cand.originMainId || cand.id;
-    return (
-      candOrig === mainNode.id ||
-      candOrig === mainOriginTag ||
-      (sponsorOwner && cand.owner && cand.owner.toLowerCase() === sponsorOwner)
-    );
+    return candOrig === mainNode.id || candOrig === mainOriginTag;
   };
 
   for (const cand of sorted) {
@@ -1290,10 +1458,14 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
   }> = [];
 
   // 1. Strip any previously synthesized Auto Extra IDs / Clones and restore base vaults on Rank 1..27 nodes
+  let hasRealOnChainExtraIds = false;
   for (let r = 1; r <= 27; r++) {
     const rList = matrixDB.nodesByRank[r];
     if (!Array.isArray(rList) || rList.length === 0) continue;
     const realNodes = rList.filter((n) => !n.isSyntheticExtra);
+    if (r >= 2 && realNodes.some((n) => n.isExtraId && !n.isClone)) {
+      hasRealOnChainExtraIds = true;
+    }
     const realIds = new Set(realNodes.map((n) => n.id));
     for (const n of realNodes) {
       if (n.leftChild > 0 && !realIds.has(n.leftChild)) n.leftChild = 0;
@@ -1305,7 +1477,12 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
       }
     }
     matrixDB.nodesByRank[r] = reconcileRankTreeLinks(realNodes);
-    matrixDB.rankCounts[r] = Math.max(1, realNodes.length);
+    matrixDB.rankCounts[r] = Math.max(1, matrixDB.nodesByRank[r].length);
+  }
+
+  // If the deployed contract natively spawns Auto Extra IDs on-chain, do not synthesize duplicate off-chain Extra IDs
+  if (hasRealOnChainExtraIds) {
+    return createdExtraNodes;
   }
 
   const r1Nodes = matrixDB.nodesByRank[1] || [];
@@ -1358,10 +1535,14 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
       const correspMain = getCorrespMainInRank(r);
       if (!correspMain) continue;
       const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 10) * 0.35).toFixed(4));
+      const maxRealExtraIdInRank = rList.reduce(
+        (m, x) => (!x.isSyntheticExtra && x.isExtraId ? Math.max(m, x.id) : m),
+        0
+      );
       for (const n of rList) {
         if (n.isSyntheticExtra) continue;
         const nOrig = rList.find((x) => x.id === (n.originMainId || n.id)) || n;
-        if ((n.isExtraId || nOrig.isExtraId) && n.leftChild > 0) {
+        if ((n.isExtraId || nOrig.isExtraId) && n.leftChild > 0 && n.leftChild > maxRealExtraIdInRank) {
           const spId =
             nOrig.directSponsorNodeId > 0
               ? nOrig.directSponsorNodeId
@@ -2959,23 +3140,29 @@ async function startApp() {
           }
         }
 
-        // Determine which node IDs need to be fetched (all if forceRefresh, or only missing/new IDs for fast delta sync)
+        // Determine which node IDs need to be fetched (all if forceRefresh, or only when maxExistingChainId < maxFetch)
+        const maxExistingChainId = realExisting.reduce(
+          (m, n) => (!n.isLocalUpgrade ? Math.max(m, n.id) : m),
+          0
+        );
         const idsToFetch: number[] = [];
-        for (let i = 1; i <= maxFetch; i++) {
-          if (forceRefresh || !mergedMap.has(i)) {
-            idsToFetch.push(i);
+        if (forceRefresh || maxExistingChainId < maxFetch) {
+          for (let i = 1; i <= maxFetch; i++) {
+            if (forceRefresh || !mergedMap.has(i)) {
+              idsToFetch.push(i);
+            }
           }
         }
 
         // If no new nodes and not forceRefresh, fast-return reconciled existing nodes
-        if (idsToFetch.length === 0 && mergedMap.size >= maxFetch) {
+        if (idsToFetch.length === 0 && maxExistingChainId >= maxFetch) {
           rankSyncTimestamps.set(cacheKey, Date.now());
           for (const loc of localUpgradedNodes) {
             mergedMap.set(loc.id, { ...loc });
           }
           const fastList = reconcileRankTreeLinks(Array.from(mergedMap.values()));
           matrixDB.nodesByRank[rankNum] = fastList;
-          matrixDB.rankCounts[rankNum] = Math.max(totalNodes, fastList.length);
+          matrixDB.rankCounts[rankNum] = Math.max(1, fastList.length);
           reconcileAutoExtraIdsAcrossRanks();
           return reconcileRankTreeLinks(matrixDB.nodesByRank[rankNum] || fastList);
         }
@@ -4663,6 +4850,17 @@ async function startApp() {
     res.json({ success: true, log: testLog });
   });
 
+  const mockAllowances: Record<string, string> = {};
+
+  app.post('/api/user/mock-approve', (req: Request, res: Response) => {
+    const { address, allowance = '1000000.00' } = req.body || {};
+    if (!address || !ethers.isAddress(address)) {
+      return res.status(400).json({ success: false, error: 'Invalid address' });
+    }
+    mockAllowances[address.toLowerCase()] = String(allowance);
+    res.json({ success: true, address, allowance: String(allowance) });
+  });
+
   app.get('/api/user/:address', async (req: Request, res: Response) => {
     const address = String(req.params.address || '');
     if (!ethers.isAddress(address)) {
@@ -4695,6 +4893,10 @@ async function startApp() {
         usdtAllowance = ethers.formatUnits(uAllow, tokenDec);
       } catch {
         // Keep defaults if token balance read times out
+      }
+
+      if (mockAllowances[address.toLowerCase()]) {
+        usdtAllowance = mockAllowances[address.toLowerCase()];
       }
 
       const hasNodes = (userProfileData?.nodes?.length ?? 0) > 0;

@@ -1150,6 +1150,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           });
 
           if (!sponsorExistsBefore) {
+            const curParent = sMap.get(node.parentId);
+            if (curParent && !curParent.isClone) continue;
             const q: number[] = [1];
             const vis = new Set<number>();
             let shallowParentId = 1;
@@ -1219,6 +1221,198 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
+        // สำหรับการวางตำแหน่ง Auto Extra ID ใน Rank 2-27:
+        // จะต้องไปต่อติดผู้แนะนำ Direct Sponsor เท่านั้น ถ้าไอดีผู้แนะนำ Direct Sponsor เต็ม ก็ไปหาไอดีโคลนนิ่งของผู้แนะนำ Direct Sponsor เท่านั้น
+        const removedFalseCloneIds = new Set<number>();
+        for (const nid of sIds) {
+          if (nid <= 1 || removedFalseCloneIds.has(nid)) continue;
+          const node = sMap.get(nid);
+          if (!node || !node.isExtraId) continue;
+
+          const spMainId = node.directSponsorNodeId > 0 ? node.directSponsorNodeId : 1;
+          let spNodeInRank: RankNodeSnapshot | undefined;
+          for (const prevId of sIds) {
+            if (prevId >= nid || removedFalseCloneIds.has(prevId)) continue;
+            const prev = sMap.get(prevId);
+            if (!prev || prev.isClone || prev.isExtraId) continue;
+            if (spMainId === 1 ? prev.id === 1 : prev.originMainId === spMainId) {
+              spNodeInRank = prev;
+              break;
+            }
+          }
+          if (!spNodeInRank) continue;
+
+          const spOrigTag = spNodeInRank.originMainId || spNodeInRank.id;
+          const curParent = sMap.get(node.parentId);
+          const isAlreadyUnderSpOrSpClone =
+            curParent &&
+            (curParent.id === spNodeInRank.id ||
+              (curParent.isClone &&
+                ((curParent.originMainId || curParent.id) === spNodeInRank.id ||
+                  (curParent.originMainId || curParent.id) === spOrigTag)));
+
+          if (!isAlreadyUnderSpOrSpClone) {
+            let targetParentId = 0;
+            let targetIsLeft = true;
+
+            const spHasLeftBefore =
+              spNodeInRank.leftChild > 0 &&
+              spNodeInRank.leftChild < nid &&
+              sMap.has(spNodeInRank.leftChild);
+            const spHasRightBefore =
+              spNodeInRank.rightChild > 0 &&
+              spNodeInRank.rightChild < nid &&
+              sMap.has(spNodeInRank.rightChild);
+
+            if (!spHasLeftBefore) {
+              targetParentId = spNodeInRank.id;
+              targetIsLeft = true;
+            } else if (!spHasRightBefore) {
+              targetParentId = spNodeInRank.id;
+              targetIsLeft = false;
+            } else {
+              for (const candId of sIds) {
+                if (candId >= nid || removedFalseCloneIds.has(candId)) continue;
+                const cand = sMap.get(candId);
+                if (!cand || !cand.isClone) continue;
+                const cOrig = cand.originMainId || cand.id;
+                if (cOrig !== spNodeInRank.id && cOrig !== spOrigTag) continue;
+
+                const cHasLeftBefore =
+                  cand.leftChild > 0 && cand.leftChild < nid && sMap.has(cand.leftChild);
+                if (!cHasLeftBefore) {
+                  targetParentId = cand.id;
+                  targetIsLeft = true;
+                  break;
+                }
+                const cHasRightBefore =
+                  cand.rightChild > 0 && cand.rightChild < nid && sMap.has(cand.rightChild);
+                if (!cHasRightBefore) {
+                  targetParentId = cand.id;
+                  targetIsLeft = false;
+                  break;
+                }
+              }
+            }
+
+            const targetParent = targetParentId > 0 ? sMap.get(targetParentId) : undefined;
+            if (targetParent && node.parentId !== targetParent.id) {
+              const oldParent = sMap.get(node.parentId);
+              if (oldParent) {
+                if (oldParent.leftChild === nid) oldParent.leftChild = 0;
+                if (oldParent.rightChild === nid) oldParent.rightChild = 0;
+              }
+
+              const displacedId = targetIsLeft ? targetParent.leftChild : targetParent.rightChild;
+              if (displacedId > 0 && displacedId !== nid && sMap.has(displacedId)) {
+                const displacedNode = sMap.get(displacedId)!;
+                const oldOrig = oldParent ? oldParent.originMainId || oldParent.id : 0;
+                const dispOrig = displacedNode.originMainId || displacedNode.id;
+                const hasChildren = Array.from(sMap.values()).some(
+                  (c) =>
+                    c.id !== displacedNode.id &&
+                    !removedFalseCloneIds.has(c.id) &&
+                    c.parentId === displacedNode.id
+                );
+
+                if (
+                  displacedNode.isClone &&
+                  oldOrig > 0 &&
+                  dispOrig === oldOrig &&
+                  (!oldParent?.rightChild || oldParent.rightChild === 0) &&
+                  !hasChildren
+                ) {
+                  removedFalseCloneIds.add(displacedNode.id);
+                  sMap.delete(displacedNode.id);
+                  if (rNum === activeRank) {
+                    rawNodes.delete(displacedNode.id);
+                  }
+                } else if (!targetParent.rightChild || !sMap.has(targetParent.rightChild)) {
+                  targetParent.rightChild = displacedNode.id;
+                  displacedNode.parentId = targetParent.id;
+                  if (rNum === activeRank) {
+                    const rawDisp = rawNodes.get(displacedNode.id);
+                    const rawTarg = rawNodes.get(targetParent.id);
+                    if (rawDisp && rawTarg) {
+                      rawDisp.parentId = targetParent.id;
+                      rawTarg.rightChild = displacedNode.id;
+                    }
+                  }
+                }
+              }
+
+              node.parentId = targetParent.id;
+              if (targetIsLeft) {
+                targetParent.leftChild = nid;
+              } else {
+                targetParent.rightChild = nid;
+              }
+
+              if (rNum === activeRank) {
+                const rawChild = rawNodes.get(nid);
+                const rawOldParent = oldParent ? rawNodes.get(oldParent.id) : undefined;
+                const rawNewParent = rawNodes.get(targetParent.id);
+                if (rawOldParent) {
+                  if (rawOldParent.leftChild === nid) rawOldParent.leftChild = 0;
+                  if (rawOldParent.rightChild === nid) rawOldParent.rightChild = 0;
+                }
+                if (rawChild && rawNewParent) {
+                  rawChild.parentId = targetParent.id;
+                  if (targetIsLeft) rawNewParent.leftChild = nid;
+                  else rawNewParent.rightChild = nid;
+                }
+              }
+            }
+          }
+        }
+
+        for (const cid of sIds) {
+          if (removedFalseCloneIds.has(cid)) continue;
+          const c = sMap.get(cid);
+          if (!c || !c.isClone) continue;
+          const origId = c.originMainId || c.id;
+          const hasAnyRightTrigger = Array.from(sMap.values()).some(
+            (m) =>
+              !removedFalseCloneIds.has(m.id) &&
+              (m.id === origId || (m.isClone && (m.originMainId || m.id) === origId)) &&
+              m.rightChild > 0 &&
+              sMap.has(m.rightChild)
+          );
+          const hasChildren = Array.from(sMap.values()).some(
+            (ch) =>
+              ch.id !== c.id &&
+              !removedFalseCloneIds.has(ch.id) &&
+              ch.parentId === c.id
+          );
+          if (!hasAnyRightTrigger && !hasChildren) {
+            removedFalseCloneIds.add(c.id);
+            sMap.delete(c.id);
+            if (rNum === activeRank) {
+              rawNodes.delete(c.id);
+            }
+            const p = sMap.get(c.parentId);
+            if (p) {
+              if (p.leftChild === c.id) {
+                if (p.rightChild > 0 && sMap.has(p.rightChild)) {
+                  p.leftChild = p.rightChild;
+                  p.rightChild = 0;
+                } else {
+                  p.leftChild = 0;
+                }
+              } else if (p.rightChild === c.id) {
+                p.rightChild = 0;
+              }
+              if (rNum === activeRank) {
+                const rawP = rawNodes.get(p.id);
+                if (rawP) {
+                  rawP.leftChild = p.leftChild;
+                  rawP.rightChild = p.rightChild;
+                }
+              }
+            }
+          }
+        }
+
         // Cap nodeVault by actual leftChild count in Rank rNum so moved leftChild doesn't leave phantom vault
         const rUnitVault = Number(((RANK_PRICES_USDT[rNum - 1] || 10) * 0.35).toFixed(4));
         for (const m of sMap.values()) {
@@ -1246,8 +1440,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       }
 
       // Ensure Pool 3 (Vault R4-27) -> Auto Extra IDs in Rank 2..27 are reconciled even when RPC fallback is used
+      let hasOnChainExtraNodes = false;
+      for (const [rNum, sMap] of multiRankSnapshots.entries()) {
+        if (rNum >= 2 && Array.from(sMap.values()).some((sn) => sn.isExtraId && !sn.isClone)) {
+          hasOnChainExtraNodes = true;
+          break;
+        }
+      }
       const snapR1Init = multiRankSnapshots.get(1);
-      if (snapR1Init && snapR1Init.size > 0) {
+      if (!hasOnChainExtraNodes && snapR1Init && snapR1Init.size > 0) {
         const initMainsByRank = new Map<number, Map<string, number[]>>();
         for (const [rNum, sMap] of multiRankSnapshots.entries()) {
           const mMap = new Map<string, number[]>();

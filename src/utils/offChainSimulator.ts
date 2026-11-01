@@ -1147,7 +1147,9 @@ export async function executeOffChainSimulationAndBatch(
     const currentAllowance: bigint = await usdtContract.allowance(userAddress, contractAddress);
     if (currentAllowance < totalCost) {
       onProgress('ขั้นตอนที่ 1/2: กรุณากดยืนยัน (Approve USDT) ในกระเป๋า MetaMask...');
-      const approveTx = await usdtContract.approve(contractAddress, totalCost * 10n);
+      const approveTx = await usdtContract.approve(contractAddress, totalCost * 10n, {
+        gasLimit: 100000n,
+      });
       onProgress('กำลังรอการยืนยัน Approve USDT บนบล็อกเชน...');
       await approveTx.wait();
     }
