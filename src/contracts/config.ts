@@ -1,7 +1,9 @@
-export const DEFAULT_CONTRACT_ADDRESS = '0xAE3736ECD23DfB6C49b76Ef8548391C1B6fFf7B9';
+export const DEFAULT_CONTRACT_ADDRESS = '0x675CDB85d9A843ac3e87b42beb7A606da79882E8';
 export const DEFAULT_USDT_ADDRESS = '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
 const LEGACY_CONTRACT_ADDRESSES = new Set([
+  '0xae3736ecd23dfb6c49b76ef8548391c1b6fff7b9',
+  '0x1700326ce4d4507a5dd88eb50156758581b6f4cb',
   '0x5f0a48aa94dcfa820a12cb8e6c46e9cce807d341',
   '0x48acb86c42a389efda47cc1b16938eea73f1f892',
   '0x82d18c8b7d6b1e3823fb52723435a3b4fb558622',
@@ -110,7 +112,7 @@ export const SUPPORTED_NETWORKS: Record<number, NetworkConfig> = {
     ],
     blockExplorerUrl: 'https://testnet.bscscan.com',
     defaultUsdtAddress: '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
-    defaultContractAddress: '0x1700326ce4d4507A5DD88EB50156758581B6F4cB',
+    defaultContractAddress: DEFAULT_CONTRACT_ADDRESS,
   },
   80002: {
     chainId: 80002,
