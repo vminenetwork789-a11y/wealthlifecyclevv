@@ -33,7 +33,7 @@ const PORT = 3000;
 const CONFIG_FILE_PATH = path.resolve(__dirname, 'prisma/contract-config.json');
 
 const DEFAULT_SYSTEM_CONFIG = {
-  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || '0x87e9f1b9a63eB65C91fcA718C5Af1cEE4eEC6209',
+  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || '0xC71A9a677D9Ef61A9133d6E6545306A11bD3eE5a',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: 97,
   networkName: 'BNB Smart Chain Testnet',
@@ -43,6 +43,7 @@ const DEFAULT_SYSTEM_CONFIG = {
 };
 
 const SERVER_LEGACY_CONTRACTS = new Set([
+  '0x87e9f1b9a63eb65c91fca718c5af1cee4eec6209',
   '0x675cdb85d9a843ac3e87b42beb7A606da79882e8',
   '0xae3736ecd23dfb6c49b76ef8548391c1b6fff7b9',
   '0x1700326ce4d4507a5dd88eb50156758581b6f4cb',
@@ -1134,8 +1135,9 @@ function findExtraIdPlacementInRankNodes(
   }
 
   const mainNode = byId.get(sponsorMainId)!;
+  const sponsorOwner = (mainNode.owner || '').toLowerCase();
 
-  // Priority 1: Directly under sponsorMainId (Left then Right)
+  // Priority 1: ต่อติดตัวผู้แนะนำ Direct Sponsor เท่านั้น (Left ซ้ายก่อน แล้ว Right ขวาตาม)
   if (!mainNode.leftChild || mainNode.leftChild <= 0 || !byId.has(mainNode.leftChild)) {
     return { parentId: mainNode.id, isLeft: true };
   }
@@ -1143,13 +1145,21 @@ function findExtraIdPlacementInRankNodes(
     return { parentId: mainNode.id, isLeft: false };
   }
 
-  // Priority 2: Clones belonging to sponsorMainId (originMainId === sponsorMainId or mainNode.originMainId)
+  // Priority 2: ถ้าไอดีผู้แนะนำเต็ม -> ไปหาไอดีโคลนนิ่งของผู้แนะนำ Direct Sponsor เท่านั้น
   const mainOriginTag = mainNode.originMainId || mainNode.id;
   const sorted = [...rNodes].sort((a, b) => a.id - b.id);
-  for (const cand of sorted) {
-    if (!cand.isClone) continue;
+  const isSponsorClone = (cand: IndexedTreeNode) => {
+    if (!cand.isClone) return false;
     const candOrig = cand.originMainId || cand.id;
-    if (candOrig === mainNode.id || candOrig === mainOriginTag) {
+    return (
+      candOrig === mainNode.id ||
+      candOrig === mainOriginTag ||
+      (sponsorOwner && cand.owner && cand.owner.toLowerCase() === sponsorOwner)
+    );
+  };
+
+  for (const cand of sorted) {
+    if (isSponsorClone(cand)) {
       if (!cand.leftChild || cand.leftChild <= 0 || !byId.has(cand.leftChild)) {
         return { parentId: cand.id, isLeft: true };
       }
@@ -1159,7 +1169,17 @@ function findExtraIdPlacementInRankNodes(
     }
   }
 
-  // Priority 3: BFS under sponsorMainId
+  // Priority 3: กรณีมีโคลนแต่โคลนติดตัวเต็ม ให้หาตำแหน่งว่างชั้นตื้นสุดภายใต้สายโคลนนิ่งของผู้แนะนำเท่านั้น
+  for (const cand of sorted) {
+    if (isSponsorClone(cand)) {
+      const cSlot = findShallowestLeftToRightSlotInRankNodes(rNodes, cand.id);
+      if (cSlot && cSlot.parentId > 0) {
+        return cSlot;
+      }
+    }
+  }
+
+  // Priority 4: Fallback ปลอดภัยกรณีไม่พบโคลน
   return findShallowestLeftToRightSlotInRankNodes(rNodes, mainNode.id);
 }
 

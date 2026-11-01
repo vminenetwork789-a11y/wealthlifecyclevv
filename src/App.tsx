@@ -510,6 +510,7 @@ export default function App() {
         isOpen={isDeployModalOpen}
         onClose={() => setIsDeployModalOpen(false)}
         language={language}
+        account={account}
         onUpdateContractAddress={updateSmartContractAddress}
       />
     </div>

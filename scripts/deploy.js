@@ -29,11 +29,11 @@ async function main() {
   const FractalFlowMatrix27 = await hre.ethers.getContractFactory("FractalFlowMatrix27");
   const matrix = await FractalFlowMatrix27.deploy(
     USDT_ADDRESS,
+    USDT_DECIMALS,
     ALL_SELL_WALLET,
     BOT_WALLET,
     FAMILY_POOL,
-    ROOT_USER,
-    USDT_DECIMALS
+    ROOT_USER
   );
   await matrix.waitForDeployment();
 
