@@ -1,0 +1,8 @@
+{
+  "name": " Matrix DApp",
+  "description": "A blockchain-integrated dashboard for monitoring reward distribution and managing smart contract operations on the Binance Smart Chain.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

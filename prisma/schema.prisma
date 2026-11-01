@@ -1,0 +1,86 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum NodeOrigin {
+  REGISTRATION // สมัครสมาชิกปกติ
+  BATCH        // สมัครแบบกลุ่ม (Batch)
+  CLONE        // โคลนอัตโนมัติจากฝั่งขวา (Rebirth)
+  AUTO_MAIN    // ไอดีหลักใหม่จาก Vault Rank 1-4
+  AUTO_EXTRA   // Extra ID จาก Vault Rank 4-MAX
+}
+
+enum RewardType {
+  DIRECT
+  LEVEL
+  UPGRADE_VAULT
+  VAULT_OVERFLOW
+  ALLSELL
+  BOT
+  FAMILY_POOL_OVERFLOW
+}
+
+model UserAccount {
+  id                String   @id @default(uuid())
+  owner             String   @unique // แอดเดรสกระเป๋าผู้ใช้
+  sponsor           String?  // แอดเดรสผู้แนะนำ
+  sponsorMainNodeId BigInt?  // ID โหนดหลักของผู้แนะนำ
+  currentMaxRank    Int      @default(1) // แรงค์สูงสุดที่ผู้ใช้ถือครอง
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  vaults            UserVault[]
+
+  @@index([owner])
+}
+
+model UserVault {
+  id            String      @id @default(uuid())
+  owner         String      // แอดเดรสกระเป๋าผู้ใช้
+  rank          Int         // แรงค์ (1-27)
+  balance       Decimal     @default(0) @db.Decimal(36, 18) // ยอดเงินสะสมใน Vault (USDT)
+  updatedAt     DateTime    @updatedAt
+
+  user          UserAccount @relation(fields: [owner], references: [owner], onDelete: Cascade)
+
+  @@unique([owner, rank])
+  @@index([owner])
+}
+
+model MatrixNode {
+  id            BigInt     @id // nodeId บน Smart Contract
+  rank          Int        // แรงค์ของโหนด (1-27)
+  owner         String     // แอดเดรสเจ้าของโหนด
+  sponsor       String     // แอดเดรสผู้แนะนำตรง
+  parentId      BigInt     // ID ของโหนดพ่อแม่
+  leftChild     BigInt     @default(0) // ID โหนดลูกซ้าย
+  rightChild    BigInt     @default(0) // ID โหนดลูกขวา
+  isClone       Boolean    @default(false) // เป็นโหนดโคลนหรือไม่
+  isExtraId     Boolean    @default(false) // เป็น Extra ID หรือไม่
+  origin        NodeOrigin @default(REGISTRATION) // ที่มาของโหนด
+  createdAt     DateTime   @default(now())
+
+  @@index([rank])
+  @@index([owner])
+  @@index([parentId])
+}
+
+model RewardLog {
+  id          String     @id @default(uuid())
+  fromNodeId  BigInt     // ID โหนดที่สร้างรายได้
+  toNodeId    BigInt     // ID โหนดผู้รับรางวัล
+  recipient   String     // แอดเดรสกระเป๋าผู้รับ
+  rank        Int        // แรงค์ที่เกิดรายการ
+  rewardType  RewardType // ประเภทของรางวัล
+  amount      Decimal    @db.Decimal(36, 18) // จำนวนเงิน (USDT)
+  txHash      String     // Hash ธุรกรรมบนบล็อกเชน
+  createdAt   DateTime   @default(now())
+
+  @@index([recipient])
+  @@index([rank])
+}

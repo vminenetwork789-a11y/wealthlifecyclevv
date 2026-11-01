@@ -1,0 +1,9 @@
+# 1. ที่อยู่ Smart Contract ที่ต้องการชี้เป้า (ถ้าไม่ใส่จะใช้ค่าเริ่มต้นของระบบ)
+OVERRIDE_CONTRACT_ADDRESS=0x82d07E805F670943A3DbF74ab777eb89189c7c27
+
+# 2. Redis Connection (ถ้าไม่มี ไม่ต้องใส่ ระบบจะใช้ Memory Queue ในตัวอัตโนมัติ)
+# REDIS_URL=redis://127.0.0.1:6379
+
+# 3. RPC เครือข่าย (เช่น BSC Testnet หรือ BSC Mainnet)
+RPC_URL=https://data-seed-prebsc-1-s1.binance.org:8545/
+USDT_ADDRESS=0x95856BE9c16afc9C147C034Cd6a514D730bD90Ba

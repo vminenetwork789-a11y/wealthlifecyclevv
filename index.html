@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FractalFlowMatrix27 Web3 DApp</title>
+    <meta name="description" content="FractalFlowMatrix27 Smart Contract Control Panel, Matrix Visualizer, Batch Simulation, and Reward Event Tracker on BNB Testnet" />
+    <meta property="og:title" content="FractalFlowMatrix27 Web3 DApp" />
+    <meta property="og:description" content="FractalFlowMatrix27 Smart Contract Control Panel, Matrix Visualizer, Batch Simulation, and Reward Event Tracker on BNB Testnet" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        // Safe-guard window.top and window.parent in cross-origin iframes (for Web3 wallet extensions like Bitget/BitKeep/MetaMask)
+        try {
+          if (window.parent !== window) {
+            try {
+              var _dummy = window.parent.location.origin;
+            } catch (err) {
+              // Cross-origin iframe detected: shadow parent and top so inpage.js doesn't crash on window.top.location.origin
+              try {
+                Object.defineProperty(window, 'parent', {
+                  get: function() { return window; },
+                  configurable: true
+                });
+              } catch (_) {}
+              try {
+                Object.defineProperty(window, 'top', {
+                  get: function() { return window; },
+                  configurable: true
+                });
+              } catch (_) {}
+            }
+          }
+        } catch (_) {}
+
+        function isExtensionOrCrossOriginError(msg, src) {
+          if (!msg && !src) return false;
+          var str = String(msg || '') + ' ' + String(src || '');
+          return (
+            str.indexOf('Blocked a frame with origin') !== -1 ||
+            str.indexOf('Failed to read a named property') !== -1 ||
+            str.indexOf('SecurityError') !== -1 ||
+            str.indexOf('chrome-extension://') !== -1 ||
+            str.indexOf('moz-extension://') !== -1 ||
+            str.indexOf('inpage.js') !== -1
+          );
+        }
+
+        window.addEventListener('error', function(e) {
+          var msg = (e && (e.message || (e.error && e.error.message))) || '';
+          var src = (e && e.filename) || '';
+          if (isExtensionOrCrossOriginError(msg, src)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function(e) {
+          var reason = e ? e.reason : null;
+          var msg = (reason && (reason.message || reason.stack || String(reason))) || '';
+          if (isExtensionOrCrossOriginError(msg, '')) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        var prevOnError = window.onerror;
+        window.onerror = function(msg, url, line, col, error) {
+          var errStr = String(msg || '') + ' ' + String(url || '') + ' ' + (error && error.message ? error.message : '');
+          if (isExtensionOrCrossOriginError(errStr, url)) {
+            return true;
+          }
+          if (typeof prevOnError === 'function') {
+            return prevOnError.apply(this, arguments);
+          }
+          return false;
+        };
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

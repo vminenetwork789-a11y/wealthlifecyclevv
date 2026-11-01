@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body {
+    background-color: #eef4fb;
+    color: #0f172a;
+    font-family: 'Prompt', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow-x: hidden;
+    width: 100%;
+    max-width: 100vw;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@layer utilities {
+  .matrix-scroll-container {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(29, 108, 231, 0.35) rgba(226, 232, 240, 0.7);
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .matrix-scroll-container::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+
+  .matrix-scroll-container::-webkit-scrollbar-track {
+    background: rgba(226, 232, 240, 0.7);
+    border-radius: 9999px;
+  }
+
+  .matrix-scroll-container::-webkit-scrollbar-thumb {
+    background: rgba(29, 108, 231, 0.35);
+    border-radius: 9999px;
+  }
+
+  .matrix-scroll-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(29, 108, 231, 0.6);
+  }
+}
+

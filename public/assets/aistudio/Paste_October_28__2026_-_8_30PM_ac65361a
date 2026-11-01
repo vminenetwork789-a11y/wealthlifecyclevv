@@ -1,0 +1,674 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract FractalFlowMatrix27 is ReentrancyGuard, Ownable {
+    using SafeERC20 for IERC20;
+
+    IERC20 public immutable usdt;
+    uint8 public constant MAX_RANK = 27;
+    uint8 public constant MAX_LEVELS = 15;
+
+    address public allSellWallet;
+    address public botWallet;
+    address public familyPool;
+
+    mapping(uint8 => uint256) public rankPrice;
+
+    struct MatrixNode {
+        uint256 id;
+        address owner;
+        address directSponsor;
+        uint256 parentId;
+        uint256 leftChild;
+        uint256 rightChild;
+        bool isClone;
+        bool isExtraId;
+    }
+
+    struct UserAccount {
+        bool isRegistered;
+        address sponsor;
+        uint256 sponsorMainNodeId;
+        uint8 currentMaxRank;
+        mapping(uint8 => uint256) firstNodeId;
+        mapping(uint8 => uint256) latestNodeId;
+        mapping(uint8 => uint256) upgradeVault;
+    }
+
+    mapping(uint8 => mapping(uint256 => MatrixNode)) public rankNodes;
+    mapping(uint8 => uint256) public totalNodesInRank;
+    mapping(uint8 => uint8) public placementRoundToggle;
+    mapping(address => UserAccount) private users;
+
+    event UserRegistered(address indexed user, address indexed sponsor, uint256 indexed sponsorNodeId, uint256 mainNodeId);
+    event BatchRegistered(address indexed user, uint256 count, uint256 totalCost);
+    event NodeCreated(uint8 indexed rank, uint256 indexed nodeId, address indexed owner, address directSponsor, uint256 parentId, bool isLeft, bool isClone, bool isExtraId);
+    event RewardDistributed(uint256 indexed fromNodeId, uint256 indexed toNodeId, address indexed recipient, uint8 rank, string rewardType, uint256 amount);
+    event RankUpgraded(address indexed user, uint8 fromRank, uint8 toRank, uint256 newNodeId, bool isAutoUpgrade);
+    event AutoNewMainIdCreated(address indexed user, uint256 count, uint256 vaultDiff);
+    event AutoExtraIdCreated(address indexed user, uint8 indexed rank, uint256 nodeId);
+
+    constructor(
+        address _usdt,
+        address _allSellWallet,
+        address _botWallet,
+        address _familyPool,
+        address _rootUser,
+        uint256 _usdtDecimals
+    ) Ownable(msg.sender) {
+        require(_usdt != address(0) && _allSellWallet != address(0) && _botWallet != address(0) && _familyPool != address(0) && _rootUser != address(0), "Invalid address");
+        usdt = IERC20(_usdt);
+        allSellWallet = _allSellWallet;
+        botWallet = _botWallet;
+        familyPool = _familyPool;
+
+        uint256 unit = 10 ** _usdtDecimals;
+        uint16[27] memory prices = [
+            5, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+            2000, 3000, 4000, 5000, 6000, 8000, 10000
+        ];
+
+        for (uint8 i = 0; i < MAX_RANK; i++) {
+            rankPrice[i + 1] = uint256(prices[i]) * unit;
+        }
+
+        users[_rootUser].isRegistered = true;
+        users[_rootUser].sponsor = address(0); // #1 ไม่มีผู้แนะนำ
+        users[_rootUser].sponsorMainNodeId = 0;
+        users[_rootUser].currentMaxRank = MAX_RANK;
+
+        for (uint8 r = 1; r <= MAX_RANK; r++) {
+            totalNodesInRank[r] = 1;
+            rankNodes[r][1] = MatrixNode({
+                id: 1,
+                owner: _rootUser,
+                directSponsor: address(0), // #1 ไม่มีผู้แนะนำ
+                parentId: 0,
+                leftChild: 0,
+                rightChild: 0,
+                isClone: false,
+                isExtraId: false
+            });
+            users[_rootUser].firstNodeId[r] = 1;
+            users[_rootUser].latestNodeId[r] = 1;
+
+            emit NodeCreated(r, 1, _rootUser, address(0), 0, true, false, false);
+        }
+    }
+
+    function checkValidSponsorId(uint256 _sponsorNodeId)
+        public
+        view
+        returns (bool isValid, string memory reason, address sponsorAddress)
+    {
+        if (_sponsorNodeId == 0 || _sponsorNodeId > totalNodesInRank[1]) {
+            return (false, "Sponsor ID does not exist", address(0));
+        }
+
+        MatrixNode storage sponsorNode = rankNodes[1][_sponsorNodeId];
+
+        if (sponsorNode.owner == address(0)) {
+            return (false, "Sponsor node has no owner", address(0));
+        }
+
+        if (sponsorNode.isClone || sponsorNode.isExtraId) {
+            return (false, "Special nodes cannot be used as a sponsor", address(0));
+        }
+
+        if (users[sponsorNode.owner].firstNodeId[1] != _sponsorNodeId) {
+            return (false, "Not the primary ID of the sponsor", address(0));
+        }
+
+        return (true, "Valid main sponsor ID", sponsorNode.owner);
+    }
+
+    function previewPlacement(uint8 _rank, address _sponsor)
+        external
+        view
+        returns (uint256 targetParentId, bool isLeft, uint8 activeRound)
+    {
+        activeRound = placementRoundToggle[_rank];
+        (targetParentId, isLeft) = _findPlacementWithRound(_rank, _sponsor, activeRound);
+    }
+
+    function getAccumulatedVault(address _user, uint8 _targetRank) public view returns (uint256 totalVault) {
+        uint8 startRank = _targetRank >= 5 ? _targetRank - 4 : 1;
+        
+        for (uint8 r = startRank; r < _targetRank; r++) {
+            totalVault += users[_user].upgradeVault[r];
+        }
+    }
+
+    function _clearVaults(address _user, uint8 _targetRank, uint256 _amountToDeduct) internal {
+        uint8 startRank = _targetRank >= 5 ? _targetRank - 4 : 1;
+        uint256 remainingDeduct = _amountToDeduct;
+
+        for (uint8 r = startRank; r < _targetRank; r++) {
+            if (remainingDeduct == 0) break;
+            uint256 vaultBal = users[_user].upgradeVault[r];
+            if (vaultBal <= remainingDeduct) {
+                remainingDeduct -= vaultBal;
+                users[_user].upgradeVault[r] = 0;
+            } else {
+                users[_user].upgradeVault[r] -= remainingDeduct;
+                remainingDeduct = 0;
+            }
+        }
+    }
+
+    function checkAndProcessAutoNewMainId(address _user) public {
+        uint256 vault1To4 = 0;
+        for (uint8 r = 1; r <= 4 && r <= MAX_RANK; r++) {
+            vault1To4 += users[_user].upgradeVault[r];
+        }
+
+        uint256 vaultTrailing5 = getAccumulatedVault(_user, 5);
+
+        if (vault1To4 > vaultTrailing5) {
+            uint256 diff = vault1To4 - vaultTrailing5;
+            uint256 rank1Price = rankPrice[1];
+            uint256 count = diff / rank1Price;
+
+            if (count > 0) {
+                _clearVaultsForRange(_user, 1, 4, diff);
+                address sponsor = _user;
+
+                for (uint256 i = 0; i < count; i++) {
+                    _createAndPlaceNode(1, _user, sponsor, false, false);
+                }
+
+                emit AutoNewMainIdCreated(_user, count, diff);
+            }
+        }
+    }
+
+    function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) public {
+        if (_currentRank < 2 || _currentRank > MAX_RANK) return;
+
+        uint256 vault4ToMax = 0;
+        for (uint8 r = 4; r <= MAX_RANK; r++) {
+            vault4ToMax += users[_user].upgradeVault[r];
+        }
+
+        uint256 vaultTrailing5 = getAccumulatedVault(_user, _currentRank);
+        if (vault4ToMax > vaultTrailing5) {
+            uint256 diff = vault4ToMax - vaultTrailing5;
+            uint256 targetPrice = rankPrice[_currentRank];
+
+            if (diff >= targetPrice) {
+                _clearVaultsForRange(_user, 4, MAX_RANK, targetPrice);
+                address sponsor = _user;
+                _createAndPlaceNode(_currentRank, _user, sponsor, false, true);
+
+                emit AutoExtraIdCreated(_user, _currentRank, totalNodesInRank[_currentRank]);
+            }
+        }
+    }
+
+    function _clearVaultsForRange(address _user, uint8 _start, uint8 _end, uint256 _amountToDeduct) internal {
+        uint256 remaining = _amountToDeduct;
+        for (uint8 r = _start; r <= _end; r++) {
+            if (remaining == 0) break;
+            uint256 bal = users[_user].upgradeVault[r];
+            if (bal <= remaining) {
+                remaining -= bal;
+                users[_user].upgradeVault[r] = 0;
+            } else {
+                users[_user].upgradeVault[r] -= remaining;
+                remaining = 0;
+            }
+        }
+    }
+
+    function registerBatch(
+        uint256 _sponsorNodeId,
+        uint256 _count,
+        uint256[] memory _targetParentIds,
+        bool[] memory _isLefts,
+        bool[] memory _isClones
+    ) external nonReentrant {
+        require(_count > 0, "Count must be greater than 0");
+        require(_targetParentIds.length == _count && _isLefts.length == _count && _isClones.length == _count, "Array lengths mismatch");
+        require(!users[msg.sender].isRegistered, "User already registered");
+
+        (bool isValid, string memory reason, address sponsorAddr) = checkValidSponsorId(_sponsorNodeId);
+        require(isValid, reason);
+        require(sponsorAddr != msg.sender, "Cannot sponsor yourself");
+
+        uint256 unitPrice = rankPrice[1];
+        uint256 totalCost = unitPrice * _count;
+
+        usdt.safeTransferFrom(msg.sender, address(this), totalCost);
+
+        users[msg.sender].isRegistered = true;
+        users[msg.sender].sponsor = sponsorAddr;
+        users[msg.sender].sponsorMainNodeId = _sponsorNodeId;
+        users[msg.sender].currentMaxRank = 1;
+
+        for (uint256 i = 0; i < _count; i++) {
+            uint256 parentId = _targetParentIds[i];
+            bool isLeft = _isLefts[i];
+            bool isClone = _isClones[i];
+
+            require(parentId > 0 && parentId <= totalNodesInRank[1], "Invalid parent node ID");
+            MatrixNode storage parentNode = rankNodes[1][parentId];
+            if (isLeft) {
+                require(parentNode.leftChild == 0, "Left slot already occupied");
+            } else {
+                require(parentNode.rightChild == 0, "Right slot already occupied");
+            }
+
+            uint256 newNodeId = ++totalNodesInRank[1];
+            rankNodes[1][newNodeId] = MatrixNode({
+                id: newNodeId,
+                owner: msg.sender,
+                directSponsor: sponsorAddr,
+                parentId: parentId,
+                leftChild: 0,
+                rightChild: 0,
+                isClone: isClone,
+                isExtraId: false
+            });
+
+            if (isLeft) {
+                rankNodes[1][parentId].leftChild = newNodeId;
+            } else {
+                rankNodes[1][parentId].rightChild = newNodeId;
+            }
+
+            if (!isClone && users[msg.sender].firstNodeId[1] == 0) {
+                users[msg.sender].firstNodeId[1] = newNodeId;
+            }
+            users[msg.sender].latestNodeId[1] = newNodeId;
+
+            emit NodeCreated(1, newNodeId, msg.sender, sponsorAddr, parentId, isLeft, isClone, false);
+
+            if (isLeft) {
+                _distributeLeftChildRewards(1, newNodeId, parentId, msg.sender);
+            } else {
+                _triggerRightChildClone(1, parentId, false);
+            }
+        }
+
+        emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, users[msg.sender].firstNodeId[1]);
+        emit BatchRegistered(msg.sender, _count, totalCost);
+    }
+
+    function register(uint256 _sponsorNodeId) external nonReentrant {
+        require(!users[msg.sender].isRegistered, "User already registered");
+
+        (bool isValid, string memory reason, address sponsorAddr) = checkValidSponsorId(_sponsorNodeId);
+        require(isValid, reason);
+        require(sponsorAddr != msg.sender, "Cannot sponsor yourself");
+
+        uint256 price = rankPrice[1];
+        usdt.safeTransferFrom(msg.sender, address(this), price);
+
+        users[msg.sender].isRegistered = true;
+        users[msg.sender].sponsor = sponsorAddr;
+        users[msg.sender].sponsorMainNodeId = _sponsorNodeId;
+        users[msg.sender].currentMaxRank = 1;
+
+        uint256 newMainNodeId = _createAndPlaceNode(1, msg.sender, sponsorAddr, false, false);
+
+        emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, newMainNodeId);
+    }
+
+    function upgradeRank(uint8 _targetRank) external nonReentrant {
+        require(users[msg.sender].isRegistered, "User not registered");
+        require(_targetRank > 1 && _targetRank <= MAX_RANK, "Invalid target rank");
+
+        uint8 currentRank = users[msg.sender].currentMaxRank;
+        require(_targetRank == currentRank + 1, "Must upgrade rank step-by-step");
+        require(users[msg.sender].firstNodeId[_targetRank] == 0, "Target rank already active");
+
+        uint256 targetPrice = rankPrice[_targetRank];
+        uint256 savedInVault = getAccumulatedVault(msg.sender, _targetRank);
+
+        if (savedInVault >= targetPrice) {
+            _clearVaults(msg.sender, _targetRank, targetPrice);
+            uint256 remainder = savedInVault - targetPrice;
+            if (remainder > 0) {
+                usdt.safeTransfer(msg.sender, remainder);
+            }
+        } else {
+            uint256 amountToPay = targetPrice - savedInVault;
+            _clearVaults(msg.sender, _targetRank, savedInVault);
+            usdt.safeTransferFrom(msg.sender, address(this), amountToPay);
+        }
+
+        users[msg.sender].currentMaxRank = _targetRank;
+        address sponsor = users[msg.sender].sponsor;
+        if (sponsor == address(0)) sponsor = rankNodes[_targetRank][1].owner;
+
+        uint256 newNodeId = _createAndPlaceNode(_targetRank, msg.sender, sponsor, false, false);
+
+        checkAndProcessAutoNewMainId(msg.sender);
+        checkAndProcessAutoExtraId(msg.sender, _targetRank);
+
+        emit RankUpgraded(msg.sender, currentRank, _targetRank, newNodeId, false);
+    }
+
+    function adminUpgradeRank(address _user, uint8 _targetRank) external onlyOwner nonReentrant {
+        require(users[_user].isRegistered, "User not registered");
+        require(_targetRank > 1 && _targetRank <= MAX_RANK, "Invalid target rank");
+
+        uint8 currentRank = users[_user].currentMaxRank;
+        require(_targetRank == currentRank + 1, "Must upgrade rank step-by-step");
+        require(users[_user].firstNodeId[_targetRank] == 0, "Target rank already active");
+
+        users[_user].currentMaxRank = _targetRank;
+        address sponsor = users[_user].sponsor;
+        if (sponsor == address(0)) sponsor = rankNodes[_targetRank][1].owner;
+
+        uint256 newNodeId = _createAndPlaceNode(_targetRank, _user, sponsor, false, false);
+
+        checkAndProcessAutoNewMainId(_user);
+        checkAndProcessAutoExtraId(_user, _targetRank);
+
+        emit RankUpgraded(_user, currentRank, _targetRank, newNodeId, false);
+    }
+
+    function _createAndPlaceNode(
+        uint8 _rank,
+        address _owner,
+        address _sponsor,
+        bool _isClone,
+        bool _isExtraId
+    ) internal returns (uint256) {
+        uint8 round = placementRoundToggle[_rank];
+        (uint256 parentId, bool isLeft) = _findPlacementWithRound(_rank, _sponsor, round);
+
+        placementRoundToggle[_rank] = round == 0 ? 1 : 0;
+
+        uint256 newNodeId = ++totalNodesInRank[_rank];
+        rankNodes[_rank][newNodeId] = MatrixNode({
+            id: newNodeId,
+            owner: _owner,
+            directSponsor: _sponsor,
+            parentId: parentId,
+            leftChild: 0,
+            rightChild: 0,
+            isClone: _isClone,
+            isExtraId: _isExtraId
+        });
+
+        if (isLeft) {
+            rankNodes[_rank][parentId].leftChild = newNodeId;
+        } else {
+            rankNodes[_rank][parentId].rightChild = newNodeId;
+        }
+
+        if (!_isClone && !_isExtraId && users[_owner].firstNodeId[_rank] == 0) {
+            users[_owner].firstNodeId[_rank] = newNodeId;
+        }
+        if (!_isExtraId) {
+            users[_owner].latestNodeId[_rank] = newNodeId;
+        }
+
+        emit NodeCreated(_rank, newNodeId, _owner, _sponsor, parentId, isLeft, _isClone, _isExtraId);
+
+        if (isLeft) {
+            _distributeLeftChildRewards(_rank, newNodeId, parentId, _owner);
+        } else {
+            _triggerRightChildClone(_rank, parentId, _isExtraId);
+        }
+
+        return newNodeId;
+    }
+
+    function _findPlacementWithRound(uint8 _rank, address _sponsor, uint8 _round) internal view returns (uint256 parentId, bool isLeft) {
+        if (_round == 0) {
+            uint256 primaryNodeId = 0;
+            if (_sponsor != address(0)) {
+                primaryNodeId = users[_sponsor].firstNodeId[_rank];
+            }
+            if (primaryNodeId == 0) {
+                primaryNodeId = 1;
+            }
+
+            MatrixNode storage primaryNode = rankNodes[_rank][primaryNodeId];
+            if (primaryNode.leftChild == 0) return (primaryNodeId, true);
+            if (primaryNode.rightChild == 0) return (primaryNodeId, false);
+
+            uint256 latestCloneId = users[_sponsor].latestNodeId[_rank];
+            if (latestCloneId != 0 && latestCloneId != primaryNodeId) {
+                MatrixNode storage latestNode = rankNodes[_rank][latestCloneId];
+                if (latestNode.leftChild == 0) return (latestCloneId, true);
+                if (latestNode.rightChild == 0) return (latestCloneId, false);
+
+                return _findFirstAvailableUnder(_rank, latestCloneId);
+            }
+
+            return _findFirstAvailableUnder(_rank, primaryNodeId);
+
+        } else {
+            return _findGlobalShallowestAvailable(_rank);
+        }
+    }
+
+    function _findFirstAvailableUnder(uint8 _rank, uint256 _startNodeId) internal view returns (uint256, bool) {
+        uint256[64] memory queue;
+        uint256 head = 0;
+        uint256 tail = 0;
+
+        queue[tail++] = _startNodeId;
+
+        while (head < tail) {
+            uint256 currentId = queue[head++];
+            MatrixNode storage node = rankNodes[_rank][currentId];
+
+            if (node.leftChild == 0) return (currentId, true);
+            if (node.rightChild == 0) return (currentId, false);
+
+            if (tail < 62) {
+                if (node.leftChild != 0) queue[tail++] = node.leftChild;
+                if (node.rightChild != 0) queue[tail++] = node.rightChild;
+            }
+        }
+        return (_startNodeId, true);
+    }
+
+    function _findGlobalShallowestAvailable(uint8 _rank) internal view returns (uint256, bool) {
+        uint256[64] memory queue;
+        uint256 head = 0;
+        uint256 tail = 0;
+
+        queue[tail++] = 1;
+
+        while (head < tail) {
+            uint256 currentId = queue[head++];
+            MatrixNode storage node = rankNodes[_rank][currentId];
+
+            if (node.leftChild == 0) return (currentId, true);
+            if (node.rightChild == 0) return (currentId, false);
+
+            if (tail < 62) {
+                if (node.leftChild != 0) queue[tail++] = node.leftChild;
+                if (node.rightChild != 0) queue[tail++] = node.rightChild;
+            }
+        }
+        return (1, true);
+    }
+
+    function _distributeLeftChildRewards(
+        uint8 _rank,
+        uint256 _fromNodeId,
+        uint256 _parentId,
+        address _nodeOwner
+    ) internal {
+        uint256 totalAmount = rankPrice[_rank];
+
+        // 1. ค่าแนะนำตรง (DIRECT 30%)
+        uint256 directReward = (totalAmount * 30) / 100;
+        address sponsor = rankNodes[_rank][_fromNodeId].directSponsor;
+        
+        // ถ้าไม่มีสปอนเซอร์ (เช่น โหนด #1) ให้ส่งผลประโยชน์เข้ากระเป๋า AllSell หรือตามที่ต้องการ
+        if (sponsor == address(0)) {
+            usdt.safeTransfer(allSellWallet, directReward);
+            emit RewardDistributed(_fromNodeId, 0, allSellWallet, _rank, "DIRECT_ROOT_FEE", directReward);
+        } else {
+            uint256 sponsorNodeId = users[sponsor].firstNodeId[_rank];
+            if (sponsorNodeId == 0) {
+                sponsorNodeId = users[sponsor].latestNodeId[_rank];
+            }
+            usdt.safeTransfer(sponsor, directReward);
+            emit RewardDistributed(_fromNodeId, sponsorNodeId, sponsor, _rank, "DIRECT", directReward);
+        }
+
+        // 2. ค่าชั้น (LEVEL 2% ต่อชั้น สูงสุด 15 ชั้น)
+        uint256 levelRewardPerTier = (totalAmount * 2) / 100;
+        uint256 currentUplineId = _parentId;
+        uint256 unpaidLevelAmount = 0;
+
+        for (uint8 i = 1; i <= MAX_LEVELS; i++) {
+            if (currentUplineId != 0) {
+                address uplineOwner = rankNodes[_rank][currentUplineId].owner;
+                usdt.safeTransfer(uplineOwner, levelRewardPerTier);
+                emit RewardDistributed(_fromNodeId, currentUplineId, uplineOwner, _rank, "LEVEL", levelRewardPerTier);
+                currentUplineId = rankNodes[_rank][currentUplineId].parentId;
+            } else {
+                unpaidLevelAmount += levelRewardPerTier;
+            }
+        }
+
+        // 3. ค่า Vault (UPGRADE VAULT 35%)
+        uint256 upgradeAmount = (totalAmount * 35) / 100;
+        address parentOwner = rankNodes[_rank][_parentId].owner;
+
+        if (_rank >= MAX_RANK || users[parentOwner].firstNodeId[_rank + 1] != 0 || rankNodes[_rank][_fromNodeId].isExtraId) {
+            address recipient = rankNodes[_rank][_fromNodeId].isExtraId ? _nodeOwner : parentOwner;
+            usdt.safeTransfer(recipient, upgradeAmount);
+            emit RewardDistributed(_fromNodeId, _parentId, recipient, _rank, "VAULT_OVERFLOW", upgradeAmount);
+        } else {
+            users[parentOwner].upgradeVault[_rank] += upgradeAmount;
+            emit RewardDistributed(_fromNodeId, _parentId, parentOwner, _rank, "UPGRADE_VAULT", upgradeAmount);
+            _checkAndProcessAutoUpgrade(parentOwner, _rank, _parentId);
+        }
+
+        // 4. กระเป๋า AllSell (4%) + ส่วนตกหล่นจากชั้น Level (unpaidLevelAmount)
+        uint256 allSellAmount = ((totalAmount * 4) / 100) + unpaidLevelAmount;
+        usdt.safeTransfer(allSellWallet, allSellAmount);
+        emit RewardDistributed(_fromNodeId, 0, allSellWallet, _rank, "ALLSELL", allSellAmount);
+
+        // 5. ค่า Bot (1%)
+        uint256 botAmount = (totalAmount * 1) / 100;
+        usdt.safeTransfer(botWallet, botAmount);
+        emit RewardDistributed(_fromNodeId, 0, botWallet, _rank, "BOT", botAmount);
+    }
+
+    function _triggerRightChildClone(uint8 _rank, uint256 _parentId, bool _isExtraId) internal {
+        address parentOwner = rankNodes[_rank][_parentId].owner;
+        address parentSponsor = users[parentOwner].sponsor;
+        
+        // ถ้าเป็น parent ของโหนด #1 ซึ่งไม่มีสปอนเซอร์ ให้ใช้ตัว parentOwner เองเป็นสปอนเซอร์ของโคลน
+        if (parentSponsor == address(0)) {
+            parentSponsor = parentOwner;
+        }
+
+        _createAndPlaceNode(_rank, parentOwner, parentSponsor, true, _isExtraId);
+    }
+
+    function _checkAndProcessAutoUpgrade(address _user, uint8 _currentRank, uint256 _triggerNodeId) internal {
+        uint8 nextRank = _currentRank + 1;
+        if (nextRank > MAX_RANK) return;
+        
+        uint256 nextPrice = rankPrice[nextRank];
+        uint256 currentVault = getAccumulatedVault(_user, nextRank);
+
+        if (currentVault >= nextPrice && users[_user].firstNodeId[nextRank] == 0) {
+            uint256 remainder = currentVault - nextPrice;
+            _clearVaults(_user, nextRank, nextPrice);
+
+            if (users[_user].currentMaxRank < nextRank) {
+                users[_user].currentMaxRank = nextRank;
+            }
+
+            address sponsor = users[_user].sponsor;
+            if (sponsor == address(0)) sponsor = rankNodes[nextRank][1].owner;
+
+            uint256 newNodeId = _createAndPlaceNode(nextRank, _user, sponsor, false, false);
+            
+            checkAndProcessAutoNewMainId(_user);
+            checkAndProcessAutoExtraId(_user, nextRank);
+
+            emit RankUpgraded(_user, nextRank - 1, nextRank, newNodeId, true);
+
+            if (remainder > 0) {
+                usdt.safeTransfer(_user, remainder);
+                emit RewardDistributed(_triggerNodeId, newNodeId, _user, nextRank - 1, "VAULT_OVERFLOW", remainder);
+            }
+        }
+    }
+
+    function emergencyWithdrawToken(address _token, uint256 _amount) external onlyOwner nonReentrant {
+        require(_token != address(0), "Invalid token address");
+        IERC20 token = IERC20(_token);
+        uint256 balance = token.balanceOf(address(this));
+        require(balance >= _amount, "Insufficient contract balance");
+        
+        token.safeTransfer(msg.sender, _amount);
+    }
+
+    function emergencyWithdrawNative() external onlyOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No native balance");
+        
+        (bool success, ) = payable(msg.sender).call{value: balance}("");
+        require(success, "Transfer failed");
+    }
+
+    function setSystemWallets(address _allSell, address _bot, address _familyPool) external onlyOwner {
+        require(_allSell != address(0) && _bot != address(0) && _familyPool != address(0), "Invalid address");
+        allSellWallet = _allSell;
+        botWallet = _bot;
+        familyPool = _familyPool;
+    }
+
+    function getUserProfile(address _user)
+        external
+        view
+        returns (
+            bool isRegistered,
+            address sponsor,
+            uint256 sponsorMainNodeId,
+            uint8 currentMaxRank,
+            uint256 mainNodeIdRank1,
+            uint256 latestCloneIdRank1
+        )
+    {
+        return (
+            users[_user].isRegistered,
+            users[_user].sponsor,
+            users[_user].sponsorMainNodeId,
+            users[_user].currentMaxRank,
+            users[_user].firstNodeId[1],
+            users[_user].latestNodeId[1]
+        );
+    }
+
+    function getUserRankInfo(address _user, uint8 _rank)
+        external
+        view
+        returns (
+            uint256 firstNodeId,
+            uint256 latestNodeId,
+            uint256 upgradeVaultBalance,
+            uint256 nextRankPrice
+        )
+    {
+        uint256 nextPrice = _rank < MAX_RANK ? rankPrice[_rank + 1] : 0;
+        return (
+            users[_user].firstNodeId[_rank],
+            users[_user].latestNodeId[_rank],
+            users[_user].upgradeVault[_rank],
+            nextPrice
+        );
+    }
+}

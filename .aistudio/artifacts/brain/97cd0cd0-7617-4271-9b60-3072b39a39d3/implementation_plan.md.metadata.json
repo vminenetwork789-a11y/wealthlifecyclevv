@@ -1,0 +1,6 @@
+{
+  "summary":  "แผนการพัฒนาระบบจัดคิว FIFO ด้วย BullMQ + Redis และ In-Memory Fallback Queue เพื่อป้องกันปัญหา Race Condition ในการแย่งตำแหน่งผังไบนารี พร้อมระบบจองตำแหน่ง (Position Lease Lock) และแสดงผลบน UI/ต้นไม้แบบเรียลไทม์",
+  "updatedAt":  "2026-10-29T07:26:26.878366274Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
