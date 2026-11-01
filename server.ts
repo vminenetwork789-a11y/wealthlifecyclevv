@@ -322,6 +322,7 @@ export interface IndexedTreeNode {
   rawNodeVault: number;
   reconciledBaseVault?: number;
   isLocalUpgrade?: boolean;
+  originType?: 'MANUAL_REGISTER' | 'AUTO_MAIN' | 'AUTO_EXTRA' | 'CLONE';
 }
 
 interface PersistentMatrixDatabase {
@@ -3057,6 +3058,13 @@ async function startApp() {
         if (id > 0) {
           const dec = vaultBn >= 100000000000000n ? 18 : (activeUsdtDecimals || 18);
           const rawVaultVal = Number(ethers.formatUnits(vaultBn, dec));
+          const isClone = Boolean(raw.isClone ?? raw[6] ?? false);
+          const isExtraId =
+            Boolean(raw.isExtraId ?? raw[7] ?? false) && !isClone;
+          let originType: IndexedTreeNode['originType'] = 'MANUAL_REGISTER';
+          if (isClone) originType = 'CLONE';
+          else if (isExtraId) originType = 'AUTO_EXTRA';
+
           return {
             id,
             rank: rankNum,
@@ -3065,16 +3073,15 @@ async function startApp() {
             parentId: Number(raw.parentId ?? raw[3] ?? 0),
             leftChild: Number(raw.leftChild ?? raw[4] ?? 0),
             rightChild: Number(raw.rightChild ?? raw[5] ?? 0),
-            isClone: Boolean(raw.isClone ?? raw[6] ?? false),
-            isExtraId:
-              Boolean(raw.isExtraId ?? raw[7] ?? false) &&
-              !Boolean(raw.isClone ?? raw[6] ?? false),
+            isClone,
+            isExtraId,
             originMainId: Number(origBn) > 0 ? Number(origBn) : id,
             cloneRound: Number(roundBn),
             directSponsorNodeId: Number(sponsorNodeBn),
             nodeVault: rawVaultVal,
             rawNodeVault: rawVaultVal,
             reconciledBaseVault: rawVaultVal,
+            originType,
           } as IndexedTreeNode;
         }
         return null;

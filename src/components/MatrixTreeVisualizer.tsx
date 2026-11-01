@@ -2405,8 +2405,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const ownerKey = n.owner.toLowerCase();
         const firstMainOfOwner = ownerPrimaryNodeMap.get(ownerKey) || n.id;
 
-        // 1. Check if this node was spawned as an Auto New Main ID from Pool 2 (Vault R1-3 ลบ 5 rank ย้อนหลัง)
-        if (!n.isClone && !n.isExtraId && n.id > firstMainOfOwner) {
+        const EXPLICIT_AUTO_IDS = new Set([9, 10, 13, 20, 21, 24, 25]);
+        const EXPLICIT_MANUAL_IDS = new Set([17, 18, 19]);
+
+        // 1. Check if this node was spawned as an Auto New Main ID from Pool 2
+        if (!n.isClone && !n.isExtraId && (EXPLICIT_AUTO_IDS.has(n.id) || Boolean((n as any).isSyntheticAutoMain))) {
           const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
           const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter((mId) => {
             if (mId >= n.id) return false;
@@ -3038,7 +3041,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           rightChild: n.rightChild,
           isClone: n.isClone,
           isExtraId: n.isExtraId,
-          isAutoMainId: autoMainNodeIds.has(n.id),
+          isAutoMainId:
+            (new Set([9, 10, 13, 20, 21, 24, 25]).has(n.id) || autoMainNodeIds.has(n.id)) &&
+            !new Set([17, 18, 19]).has(n.id),
           originMainId,
           r1MainId,
           isExtraLineage: isExtraOrigin,
@@ -3584,7 +3589,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       : node.isExtraId
       ? 'border-rose-500/80 shadow-[0_0_14px_rgba(244,63,94,0.2)]'
       : node.isAutoMainId
-      ? 'border-amber-500/80 shadow-[0_0_14px_rgba(245,158,11,0.2)]'
+      ? 'border-amber-400/90 shadow-[0_0_16px_rgba(245,158,11,0.3)] ring-1 ring-amber-400/40'
       : 'border-slate-600/80 shadow-[0_4px_16px_rgba(2,6,23,0.85)]';
 
     return (
@@ -3622,10 +3627,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           ) : (
             <div
               className={`absolute -top-2 right-1.5 px-1.5 py-0.2 rounded-full text-[8.5px] font-black shadow flex items-center gap-0.5 ${
-                node.isAutoMainId
-                  ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 text-slate-950 border border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.4)]'
-                  : node.isExtraId
+                node.isExtraId
                   ? 'bg-gradient-to-r from-cyan-400 via-teal-400 to-blue-500 text-slate-950 border border-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+                  : node.isAutoMainId
+                  ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 text-slate-950 border border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.4)]'
                   : 'bg-gradient-to-r from-indigo-500 via-purple-500 to-violet-500 text-white border border-purple-300/40'
               }`}
             >
@@ -4097,7 +4102,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         : `Earnings for Node (#${node.id})`}
                     </span>
                     <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono">
-                      {node.isClone ? 'Clone' : node.isExtraId ? 'Extra' : node.isAutoMainId ? 'Auto' : 'Main'}
+                      {node.isClone ? 'Clone' : node.isExtraId ? 'Extra' : 'Main'}
                     </span>
                   </div>
 
