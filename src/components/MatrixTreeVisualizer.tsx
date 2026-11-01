@@ -1568,7 +1568,17 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           subCloneDepthMap.set(n.id, 0);
         } else if (n.isClone) {
           const walletFirstId = ownerPrimaryNodeMap.get(ownerKey) || n.id;
-          const onChainOrigin = onChainOriginMap.get(n.id) || 0;
+          const rawOnChainOrigin = onChainOriginMap.get(n.id) || 0;
+          let onChainOrigin = rawOnChainOrigin;
+          if (activeRank > 1 && rawOnChainOrigin > 1) {
+            const ownerMains = ownerAllMainNodesMap.get(ownerKey) || [];
+            const matchedLocalMain = ownerMains.find(
+              (mId) => (onChainOriginMap.get(mId) || mId) === rawOnChainOrigin
+            );
+            if (matchedLocalMain) {
+              onChainOrigin = matchedLocalMain;
+            }
+          }
           let spawnedFromNodeId = 0;
 
           for (let lookback = id - 1; lookback >= 1; lookback--) {
@@ -1848,7 +1858,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
           const deducted = Math.max(0, Number((totalGross1To3 - totalRem1To3).toFixed(4)));
           const spawnedCount =
-            window5Start > 1 && r1Id === 1 ? Math.floor((deducted + 1e-4) / 5) : 0;
+            window5Start > 1 ? Math.floor((deducted + 1e-4) / 5) : 0;
           crossRankAutoIdCount.set(r1Id, spawnedCount);
 
           if (grossParts.length > 1 && spawnedCount > 0) {
@@ -1942,6 +1952,26 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         // If nodeId is a clone, it ALWAYS inherits the sponsor of its originMainId (never originMainId itself, except Root #1)
         if (n && n.isClone) {
           const originMain = originMainIdMap.get(nodeId) || nodeId;
+          if (activeRank > 1) {
+            const r1OriginMain =
+              onChainOriginMap.get(nodeId) ||
+              onChainOriginMap.get(originMain) ||
+              getCorrespondingMainIdInRank(activeRank, originMain, n.owner, 1);
+            if (r1OriginMain === 1) {
+              return 1;
+            }
+            if (r1OriginMain > 1 && snap1) {
+              const origR1Node = snap1.get(r1OriginMain);
+              if (origR1Node && origR1Node.directSponsorNodeId > 0) {
+                return origR1Node.directSponsorNodeId;
+              }
+            }
+            const explicitCloneSp =
+              onChainSponsorNodeMap.get(nodeId) || onChainSponsorNodeMap.get(originMain) || 0;
+            if (explicitCloneSp > 0) {
+              return explicitCloneSp;
+            }
+          }
           if (originMain !== nodeId) {
             if (originMain === 1) {
               return 1;
@@ -1967,18 +1997,46 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
-        // ผู้แนะนำใน Rank 2-27 ห้ามเปลี่ยน! ต้องยึดตามผู้แนะนำเดิมจาก Rank 1 (snap1) เสมอ
+        // ผู้แนะนำใน Rank 2-27 ห้ามเปลี่ยน! ต้องยึดตามผู้แนะนำเดิมของรหัสหลักนั้นจาก Rank 1 (snap1) เสมอ
         if (activeRank > 1 && snap1) {
           if (n) {
-            const userR1 = Array.from(snap1.values()).find(
+            const localOrigin = originMainIdMap.get(nodeId) || nodeId;
+            const r1MainId =
+              onChainOriginMap.get(nodeId) ||
+              onChainOriginMap.get(localOrigin) ||
+              getCorrespondingMainIdInRank(activeRank, localOrigin, n.owner, 1);
+            const exactUserR1 = r1MainId > 0 ? snap1.get(r1MainId) : undefined;
+            if (exactUserR1) {
+              if (exactUserR1.directSponsorNodeId && exactUserR1.directSponsorNodeId > 0) {
+                return exactUserR1.directSponsorNodeId;
+              }
+              if (exactUserR1.directSponsor && exactUserR1.directSponsor !== ethers.ZeroAddress) {
+                const spNodeInR1 = Array.from(snap1.values()).find(
+                  (sn) =>
+                    sn.owner.toLowerCase() === exactUserR1.directSponsor.toLowerCase() &&
+                    !sn.isClone &&
+                    !sn.isExtraId
+                );
+                if (spNodeInR1) return spNodeInR1.id;
+              }
+            }
+            const explicitOnChainSp =
+              onChainSponsorNodeMap.get(nodeId) || onChainSponsorNodeMap.get(localOrigin) || 0;
+            if (explicitOnChainSp > 0) {
+              return explicitOnChainSp;
+            }
+            const fallbackUserR1 = Array.from(snap1.values()).find(
               (sn) => sn.owner.toLowerCase() === n.owner.toLowerCase() && !sn.isClone && !sn.isExtraId
             );
-            if (userR1) {
-              const spR1Id = userR1.directSponsorNodeId;
+            if (fallbackUserR1) {
+              const spR1Id = fallbackUserR1.directSponsorNodeId;
               if (spR1Id && spR1Id > 0) return spR1Id;
-              if (userR1.directSponsor && userR1.directSponsor !== ethers.ZeroAddress) {
+              if (fallbackUserR1.directSponsor && fallbackUserR1.directSponsor !== ethers.ZeroAddress) {
                 const spNodeInR1 = Array.from(snap1.values()).find(
-                  (sn) => sn.owner.toLowerCase() === userR1.directSponsor.toLowerCase() && !sn.isClone && !sn.isExtraId
+                  (sn) =>
+                    sn.owner.toLowerCase() === fallbackUserR1.directSponsor.toLowerCase() &&
+                    !sn.isClone &&
+                    !sn.isExtraId
                 );
                 if (spNodeInR1) return spNodeInR1.id;
               }
@@ -1993,7 +2051,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         }
 
         const directOnChainSponsor = onChainSponsorNodeMap.get(nodeId) || 0;
-        if (directOnChainSponsor > 0 && (activeRank === 1 || directOnChainSponsor > 1)) {
+        if (directOnChainSponsor > 0) {
           return directOnChainSponsor;
         }
 
@@ -2083,6 +2141,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 const r1Bal = lineageAutoIdVault.get(sourceMain) || 0;
                 const extraBal = extraVaultFromRanks2To4.get(sourceMain) || 0;
                 lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
+              } else if (
+                explicitSponsorId > 0 &&
+                (ownerAllMainNodesMap.get(ownerKey) || []).includes(explicitSponsorId) &&
+                explicitSponsorId < n.id
+              ) {
+                sourceMain = explicitSponsorId;
+              } else if (priorMains.length > 0) {
+                sourceMain = priorMains[0];
               }
             }
 
@@ -2138,30 +2204,44 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 onChainSponsorNodeMap.get(parent.id) ||
                 resolveSponsorNodeIdForNode(parentMainId, (parentMainNode || parent).directSponsor) ||
                 1;
-              const extraSponsorMainId = originMainIdMap.get(extraSponsorNodeId) || extraSponsorNodeId;
+              const extraSponsorR1MainId =
+                activeRank === 1
+                  ? originMainIdMap.get(extraSponsorNodeId) || extraSponsorNodeId
+                  : extraSponsorNodeId;
+              const extraSponsorLocalMainId =
+                activeRank === 1
+                  ? extraSponsorR1MainId
+                  : getCorrespondingMainIdInRank(
+                      1,
+                      extraSponsorR1MainId,
+                      (parentMainNode || parent).directSponsor,
+                      activeRank
+                    );
               const fullLevelBonusUnit = Number((unitPrice * 0.3).toFixed(4));
 
-              // 1. 30% ค่าแนะนำ -> ส่งกลับไปให้ directSponsor
-              nodeDirectBonusMap.set(
-                extraSponsorMainId,
-                Number(((nodeDirectBonusMap.get(extraSponsorMainId) || 0) + directBonusUnit).toFixed(4))
-              );
+              if (extraSponsorLocalMainId > 0) {
+                // 1. 30% ค่าแนะนำ -> ส่งกลับไปให้ directSponsor
+                nodeDirectBonusMap.set(
+                  extraSponsorLocalMainId,
+                  Number(((nodeDirectBonusMap.get(extraSponsorLocalMainId) || 0) + directBonusUnit).toFixed(4))
+                );
 
-              // 2. 30% ค่าชั้น -> ส่งกลับไปให้ directSponsor
-              nodeUnilevelBonusMap.set(
-                extraSponsorMainId,
-                Number(((nodeUnilevelBonusMap.get(extraSponsorMainId) || 0) + fullLevelBonusUnit).toFixed(4))
-              );
+                // 2. 30% ค่าชั้น -> ส่งกลับไปให้ directSponsor
+                nodeUnilevelBonusMap.set(
+                  extraSponsorLocalMainId,
+                  Number(((nodeUnilevelBonusMap.get(extraSponsorLocalMainId) || 0) + fullLevelBonusUnit).toFixed(4))
+                );
 
-              // 3. Vault (35%) -> ส่งกลับที่ New Extra ID Pool ของ directSponsor
-              lineageExtraIdVault.set(
-                extraSponsorMainId,
-                Number(((lineageExtraIdVault.get(extraSponsorMainId) || 0) + vaultUnit).toFixed(4))
-              );
-              lineageGrossVaultMap.set(
-                extraSponsorMainId,
-                Number(((lineageGrossVaultMap.get(extraSponsorMainId) || 0) + vaultUnit).toFixed(4))
-              );
+                // 3. Vault (35%) -> ส่งกลับที่ New Extra ID Pool ของ directSponsor
+                lineageExtraIdVault.set(
+                  extraSponsorLocalMainId,
+                  Number(((lineageExtraIdVault.get(extraSponsorLocalMainId) || 0) + vaultUnit).toFixed(4))
+                );
+                lineageGrossVaultMap.set(
+                  extraSponsorLocalMainId,
+                  Number(((lineageGrossVaultMap.get(extraSponsorLocalMainId) || 0) + vaultUnit).toFixed(4))
+                );
+              }
             } else {
               // A. 30% Direct Referral
               const isId1Clone = n.isClone && originMainIdMap.get(n.id) === 1;
@@ -2177,10 +2257,16 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 );
               } else {
                 const sponsorNodeId = resolveSponsorNodeIdForNode(n.id, n.directSponsor);
-                if (sponsorNodeId > 0) {
+                const targetSponsorNodeInActiveRank =
+                  activeRank === 1
+                    ? sponsorNodeId
+                    : getCorrespondingMainIdInRank(1, sponsorNodeId, n.directSponsor, activeRank);
+                if (targetSponsorNodeInActiveRank > 0) {
                   nodeDirectBonusMap.set(
-                    sponsorNodeId,
-                    Number(((nodeDirectBonusMap.get(sponsorNodeId) || 0) + directBonusUnit).toFixed(4))
+                    targetSponsorNodeInActiveRank,
+                    Number(
+                      ((nodeDirectBonusMap.get(targetSponsorNodeInActiveRank) || 0) + directBonusUnit).toFixed(4)
+                    )
                   );
                 }
               }
@@ -2428,6 +2514,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                     sourceMain,
                     Number(((s1AutoVaultSim.get(sourceMain) || 0) + (extraVaultFromRanks2To4.get(sourceMain) || 0)).toFixed(4))
                   );
+                } else if (
+                  explicitSpId > 0 &&
+                  (s1OwnerAllMains.get(oKey) || []).includes(explicitSpId) &&
+                  explicitSpId < id1
+                ) {
+                  sourceMain = explicitSpId;
+                } else if (priorMains.length > 0) {
+                  sourceMain = priorMains[0];
                 }
               }
               if (sourceMain !== undefined) {
@@ -2564,22 +2658,53 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         }
 
         let directUplineNodeId = 0;
-        if (n.owner && n.owner.toLowerCase() === rootOwnerKey) {
+        const isRootMainItself = n.id === 1 && !n.isClone && !n.isExtraId;
+        const isRootClone =
+          n.isClone && !isExtraOrigin && (r1MainId === 1 || originMainId === 1);
+
+        if (isRootMainItself || isRootClone) {
           directUplineNodeId = 0;
         } else if (autoIdSourceMainMap.has(n.id)) {
           directUplineNodeId = autoIdSourceMainMap.get(n.id)!;
-        } else if (extraIdSourceMainMap.has(n.id)) {
-          directUplineNodeId = extraIdSourceMainMap.get(n.id)!;
+        } else if (n.isExtraId || extraIdSourceMainMap.has(n.id)) {
+          const rawExtraSp =
+            extraIdSourceMainMap.get(n.id) ||
+            onChainSponsorNodeMap.get(n.id) ||
+            resolveSponsorNodeIdForNode(n.id, n.directSponsor) ||
+            1;
+          const extraSpR1 =
+            activeRank === 1
+              ? rawExtraSp
+              : onChainOriginMap.get(rawExtraSp) ||
+                getCorrespondingMainIdInRank(
+                  activeRank,
+                  rawExtraSp,
+                  n.directSponsor || n.owner,
+                  1
+                ) ||
+                rawExtraSp;
+          directUplineNodeId = extraSpR1 > 0 ? extraSpR1 : 1;
         } else if (n.isClone) {
-          if (originMainId === 1) {
-            directUplineNodeId = 1;
+          const originEnriched = enrichedMap.get(originMainId);
+          if (originEnriched && originEnriched.directUplineNodeId > 0) {
+            directUplineNodeId = originEnriched.directUplineNodeId;
+          } else if (autoIdSourceMainMap.has(originMainId)) {
+            directUplineNodeId = autoIdSourceMainMap.get(originMainId)!;
+          } else if (extraIdSourceMainMap.has(originMainId)) {
+            const rawExtraSp = extraIdSourceMainMap.get(originMainId)!;
+            directUplineNodeId =
+              activeRank === 1
+                ? rawExtraSp
+                : onChainOriginMap.get(rawExtraSp) ||
+                  getCorrespondingMainIdInRank(
+                    activeRank,
+                    rawExtraSp,
+                    n.directSponsor || n.owner,
+                    1
+                  ) ||
+                  rawExtraSp;
           } else {
-            const originEnriched = enrichedMap.get(originMainId);
-            if (originEnriched && originEnriched.directUplineNodeId > 0) {
-              directUplineNodeId = originEnriched.directUplineNodeId;
-            } else {
-              directUplineNodeId = resolveSponsorNodeIdForNode(n.id, n.directSponsor);
-            }
+            directUplineNodeId = resolveSponsorNodeIdForNode(n.id, n.directSponsor);
           }
         } else if (activeRank > 1 && !n.isExtraId) {
           // ผู้แนะนำใน Rank 2-27 ยึดตามผู้แนะนำเดิมของรหัสหลักนั้นจาก Rank 1 เสมอ
@@ -2588,14 +2713,21 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             const userR1 =
               (r1MainId ? snap1.get(r1MainId) : undefined) ||
               Array.from(snap1.values()).find(
-                (sn) => sn.owner.toLowerCase() === n.owner.toLowerCase() && !sn.isClone && !sn.isExtraId
+                (sn) =>
+                  sn.owner.toLowerCase() === n.owner.toLowerCase() &&
+                  !sn.isClone &&
+                  !sn.isExtraId &&
+                  (n.id === 1 || sn.id > 1)
               );
             if (userR1) {
               if (userR1.directSponsorNodeId && userR1.directSponsorNodeId > 0) {
                 r1FoundSponsor = userR1.directSponsorNodeId;
               } else if (userR1.directSponsor && userR1.directSponsor !== ethers.ZeroAddress) {
                 const spR1 = Array.from(snap1.values()).find(
-                  (sn) => sn.owner.toLowerCase() === userR1.directSponsor.toLowerCase() && !sn.isClone && !sn.isExtraId
+                  (sn) =>
+                    sn.owner.toLowerCase() === userR1.directSponsor.toLowerCase() &&
+                    !sn.isClone &&
+                    !sn.isExtraId
                 );
                 if (spR1) r1FoundSponsor = spR1.id;
               }

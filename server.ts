@@ -317,6 +317,7 @@ export interface IndexedTreeNode {
   nodeVault: number;
   rawNodeVault: number;
   reconciledBaseVault?: number;
+  isLocalUpgrade?: boolean;
 }
 
 interface PersistentMatrixDatabase {
@@ -472,9 +473,22 @@ function rebuildDatabaseRewardLogsFromNodes() {
     const resolveSponsorNodeId = (nodeId: number): number => {
       const n = nodesMap.get(nodeId);
       if (!n || nodeId === 1) return 1;
+      if (rankNum > 1 && n.originMainId > 1) {
+        const origR1 = r1Nodes.find((x) => x.id === n.originMainId);
+        if (origR1 && origR1.directSponsorNodeId > 0) {
+          return origR1.directSponsorNodeId;
+        }
+      }
       if (n.directSponsorNodeId > 0) return n.directSponsorNodeId;
       const spKey = (n.directSponsor || '').toLowerCase();
       if (!spKey || spKey === ethers.ZeroAddress) return 1;
+
+      if (rankNum > 1) {
+        const spInR1 = r1Nodes.find(
+          (x) => x.owner.toLowerCase() === spKey && !x.isClone && !x.isExtraId
+        );
+        if (spInR1) return spInR1.id;
+      }
 
       let cur = n.parentId;
       const guard = new Set<number>();
@@ -522,7 +536,10 @@ function rebuildDatabaseRewardLogsFromNodes() {
             : parent.directSponsorNodeId > 0
             ? parent.directSponsorNodeId
             : resolveSponsorNodeId(parentOrigin.id);
-        const extraSpNode = nodesMap.get(extraSpNodeId);
+        const extraSpNode =
+          rankNum > 1
+            ? r1Nodes.find((x) => x.id === extraSpNodeId) || nodesMap.get(extraSpNodeId)
+            : nodesMap.get(extraSpNodeId);
         const extraSpRecip =
           extraSpNode?.owner || parentOrigin.directSponsor || parent.directSponsor || rootOwnerAddr;
         const fullLevelAmt = (unitPrice * 0.3).toFixed(2);
@@ -610,8 +627,11 @@ function rebuildDatabaseRewardLogsFromNodes() {
       }
 
       const spNodeId = resolveSponsorNodeId(id);
-      const spNode = nodesMap.get(spNodeId);
-      const isId1CloneChild = child.isClone && parent.id === 1;
+      const spNode =
+        rankNum > 1
+          ? r1Nodes.find((x) => x.id === spNodeId) || nodesMap.get(spNodeId)
+          : nodesMap.get(spNodeId);
+      const isId1CloneChild = child.isClone && (child.originMainId === 1 || parent.id === 1);
       const directRecip = isId1CloneChild
         ? familyAddr
         : spNode?.owner || child.directSponsor || rootOwnerAddr;
@@ -1503,16 +1523,21 @@ async function getUserProfileWithVaults(owner: string) {
   if (r1Nodes.length > 0) {
     const ownedR1 = r1Nodes.filter((n) => n.owner.toLowerCase() === key);
     if (ownedR1.length > 0) {
-      let maxRank = 1;
-      for (let r = 27; r >= 1; r--) {
-        const rList = matrixDB.nodesByRank[r] || [];
-        if (rList.some((n) => n.owner.toLowerCase() === key)) {
-          maxRank = r;
-          break;
+      const firstMain = ownedR1.find((n) => !n.isClone && !n.isExtraId) || ownedR1[0];
+      let maxRank = firstMain.id === 1 ? 27 : 1;
+      if (firstMain.id !== 1) {
+        for (let r = 27; r >= 2; r--) {
+          const rList = matrixDB.nodesByRank[r] || [];
+          if (
+            rList.some(
+              (n) => !n.isClone && !n.isExtraId && n.originMainId === firstMain.id
+            )
+          ) {
+            maxRank = r;
+            break;
+          }
         }
       }
-
-      const firstMain = ownedR1.find((n) => !n.isClone && !n.isExtraId) || ownedR1[0];
       const sponsorAddr = firstMain.directSponsor || ethers.ZeroAddress;
       const sponsorMainId = firstMain.directSponsorNodeId > 0 ? String(firstMain.directSponsorNodeId) : '1';
 
@@ -2759,18 +2784,22 @@ async function startApp() {
         const contract = new ethers.Contract(targetContract, MATRIX_READ_ABI, provider);
 
         const realExisting = existingNodes.filter((n) => !n.isSyntheticExtra);
-        let totalNodes = realExisting.length || 1;
+        let totalNodes = realExisting.filter((n) => !n.isLocalUpgrade).length || 1;
         try {
           const totalBn = await contract.totalNodesInRank(rankNum);
           totalNodes = Math.max(1, Number(totalBn));
         } catch {
-          totalNodes = Math.max(1, realExisting.length || 1);
+          totalNodes = Math.max(1, realExisting.filter((n) => !n.isLocalUpgrade).length || 1);
         }
+
+        const localUpgradedNodes = realExisting.filter(
+          (n) => n.isLocalUpgrade && n.id > totalNodes
+        );
 
         const maxFetch = Math.max(totalNodes, 1);
         const mergedMap = new Map<number, IndexedTreeNode>();
         for (const existing of realExisting) {
-          if (existing && existing.id > 0 && existing.id <= totalNodes) {
+          if (existing && existing.id > 0 && existing.id <= totalNodes && !existing.isLocalUpgrade) {
             const copy = { ...existing };
             if (copy.leftChild > maxFetch) copy.leftChild = 0;
             if (copy.rightChild > maxFetch) copy.rightChild = 0;
@@ -2789,11 +2818,12 @@ async function startApp() {
         // If no new nodes and not forceRefresh, fast-return reconciled existing nodes
         if (idsToFetch.length === 0 && mergedMap.size >= maxFetch) {
           rankSyncTimestamps.set(cacheKey, Date.now());
-          const fastList = reconcileRankTreeLinks(
-            Array.from(mergedMap.values()).filter((n) => n.id <= totalNodes)
-          );
+          for (const loc of localUpgradedNodes) {
+            mergedMap.set(loc.id, { ...loc });
+          }
+          const fastList = reconcileRankTreeLinks(Array.from(mergedMap.values()));
           matrixDB.nodesByRank[rankNum] = fastList;
-          matrixDB.rankCounts[rankNum] = totalNodes;
+          matrixDB.rankCounts[rankNum] = Math.max(totalNodes, fastList.length);
           reconcileAutoExtraIdsAcrossRanks();
           return reconcileRankTreeLinks(matrixDB.nodesByRank[rankNum] || fastList);
         }
@@ -2838,23 +2868,59 @@ async function startApp() {
           }
         }
 
+        // Re-attach any local database-upgraded nodes whose Main ID is not yet on-chain in this rank
+        for (const loc of localUpgradedNodes) {
+          const alreadyOnChain = Array.from(mergedMap.values()).some(
+            (n) =>
+              !n.isLocalUpgrade &&
+              !n.isClone &&
+              !n.isExtraId &&
+              !loc.isClone &&
+              n.originMainId === loc.originMainId
+          );
+          if (!alreadyOnChain && !mergedMap.has(loc.id)) {
+            mergedMap.set(loc.id, { ...loc });
+          }
+        }
+
         const fetchedNodes = reconcileRankTreeLinks(Array.from(mergedMap.values()));
 
         // Reconcile Rank 1 sponsor & originMainId for Rank 2-27 so ผู้แนะนำ (Direct Sponsor) never changes!
         if (rankNum > 1) {
           const r1Nodes = matrixDB.nodesByRank[1] || [];
           for (const fn of fetchedNodes) {
-            if (!fn.isClone && !fn.isExtraId) {
-              const origNodeR1 = r1Nodes.find((n) => n.id === fn.originMainId);
+            if (fn.isExtraId) {
+              if (!fn.directSponsorNodeId || fn.directSponsorNodeId <= 0) {
+                fn.directSponsorNodeId = 1;
+              }
+            } else if (!fn.isClone) {
+              const origNodeR1 =
+                fn.originMainId > 1 || fn.id === 1
+                  ? r1Nodes.find((n) => n.id === fn.originMainId && !n.isClone && !n.isExtraId)
+                  : undefined;
               const userR1 =
                 origNodeR1 ||
                 r1Nodes.find(
-                  (n) => n.owner.toLowerCase() === fn.owner.toLowerCase() && !n.isClone && !n.isExtraId
+                  (n) =>
+                    n.owner.toLowerCase() === fn.owner.toLowerCase() &&
+                    !n.isClone &&
+                    !n.isExtraId &&
+                    (fn.id === 1 ? n.id === 1 : n.id > 1)
                 );
               if (userR1) {
                 fn.originMainId = userR1.id;
-                fn.directSponsorNodeId = userR1.directSponsorNodeId || 1;
+                fn.directSponsorNodeId = userR1.directSponsorNodeId || (userR1.id === 1 ? 0 : 1);
                 fn.directSponsor = userR1.directSponsor;
+              }
+            } else if (fn.isClone) {
+              const localOriginMain = fetchedNodes.find(
+                (m) => !m.isClone && !m.isExtraId && (m.id === fn.originMainId || m.originMainId === fn.originMainId)
+              );
+              const r1OriginId = localOriginMain ? localOriginMain.originMainId : fn.originMainId;
+              const origNodeR1 = r1Nodes.find((n) => n.id === r1OriginId && !n.isClone && !n.isExtraId);
+              if (origNodeR1) {
+                fn.directSponsorNodeId = origNodeR1.directSponsorNodeId || (origNodeR1.id === 1 ? 0 : 1);
+                fn.directSponsor = origNodeR1.directSponsor;
               }
             }
           }
@@ -3308,29 +3374,103 @@ async function startApp() {
     try {
       const { targetRank, mainId, owner } = req.body;
       const rankNum = Math.min(Math.max(Number(targetRank) || 2, 2), 27);
-      const mainIdNum = Number(mainId) || 1;
-
-      if (!matrixDB.nodesByRank[rankNum]) {
-        matrixDB.nodesByRank[rankNum] = [];
-      }
-      const rList = matrixDB.nodesByRank[rankNum];
+      const mainIdNum = Math.max(1, Number(mainId) || 1);
 
       const r1Nodes = matrixDB.nodesByRank[1] || [];
-      const mainNodeR1 = r1Nodes.find((n) => n.id === mainIdNum);
-      const ownerAddr = owner ? String(owner).toLowerCase() : (mainNodeR1?.owner || matrixDB.systemWallets.rootOwner).toLowerCase();
+      const mainNodeR1 = r1Nodes.find((n) => n.id === mainIdNum && !n.isClone && !n.isExtraId);
+      if (!mainNodeR1) {
+        return res.status(404).json({
+          success: false,
+          error: `ไม่พบรหัสหลัก Main ID #${mainIdNum} ในระบบ Rank 1`,
+        });
+      }
 
-      let existingNodeInRank = rList.find((n) => n.owner.toLowerCase() === ownerAddr && !n.isClone && !n.isExtraId);
+      const ownerAddr = (mainNodeR1.owner || owner || matrixDB.systemWallets.rootOwner).toLowerCase();
+      const sponsorAddr = mainNodeR1.directSponsor || matrixDB.systemWallets.rootOwner;
+      const r1SponsorMainId = mainNodeR1.directSponsorNodeId > 0 ? mainNodeR1.directSponsorNodeId : 1;
 
-      if (!existingNodeInRank) {
-        const nextIdInRank = rList.length + 1;
-        const placement = await simulateFindPlacement(rankNum, ownerAddr, 0);
+      // Determine current rank specifically for THIS Main ID (`mainIdNum`), not across the whole wallet
+      let currentRank = mainIdNum === 1 ? 27 : 1;
+      if (mainIdNum !== 1) {
+        for (let r = 27; r >= 2; r--) {
+          const list = (matrixDB.nodesByRank[r] || []).filter((n) => !n.isSyntheticExtra);
+          if (list.some((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum)) {
+            currentRank = r;
+            break;
+          }
+        }
+      }
+
+      if (rankNum <= currentRank) {
+        return res.json({
+          success: true,
+          source: 'DATABASE_SIMULATION',
+          mainId: mainIdNum,
+          currentRank,
+          targetRank: rankNum,
+          txHash: `0xupg${Date.now().toString(16)}`,
+          message: `รหัสหลัก #${mainIdNum} อยู่ใน Rank ${currentRank} เรียบร้อยแล้ว`,
+        });
+      }
+
+      // Upgrade step-by-step from currentRank + 1 up to rankNum for this specific Main ID
+      for (let r = currentRank + 1; r <= rankNum; r++) {
+        if (!matrixDB.nodesByRank[r]) {
+          matrixDB.nodesByRank[r] = [];
+        }
+        const rList = matrixDB.nodesByRank[r].filter((n) => !n.isSyntheticExtra);
+        matrixDB.nodesByRank[r] = rList;
+
+        const existingNodeInRank = rList.find(
+          (n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum
+        );
+        if (existingNodeInRank) continue;
+
+        const rankPrice = RANK_PRICES_USDT[r - 1] || 10;
+
+        // Deduct available vault from this Main ID's 5-rank window (window5Start..r-1)
+        const prevRank = r - 1;
+        const winStart = Math.max(1, prevRank - 4);
+        let remDeduct = rankPrice;
+        let totalVaultDeducted = 0;
+
+        for (let wr = winStart; wr <= prevRank; wr++) {
+          if (remDeduct <= 1e-6) break;
+          const wrList = matrixDB.nodesByRank[wr] || [];
+          const wrNode =
+            wr === 1
+              ? wrList.find((n) => n.id === mainIdNum && !n.isClone && !n.isExtraId)
+              : wrList.find((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum);
+          if (wrNode && Number(wrNode.nodeVault || 0) > 0) {
+            const avail = Number(wrNode.nodeVault || 0);
+            const deduct = Math.min(avail, remDeduct);
+            wrNode.nodeVault = Number(Math.max(0, avail - deduct).toFixed(4));
+            wrNode.reconciledBaseVault = wrNode.nodeVault;
+            remDeduct = Number(Math.max(0, remDeduct - deduct).toFixed(4));
+            totalVaultDeducted = Number((totalVaultDeducted + deduct).toFixed(4));
+          }
+        }
+
+        // Find Direct Sponsor's Main Node in rank `r`
+        const spNodeInR =
+          rList.find(
+            (n) =>
+              !n.isClone &&
+              !n.isExtraId &&
+              (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
+          ) || rList[0];
+        const sponsorNodeIdInR = spNodeInR ? spNodeInR.id : 1;
+
+        const placement = findExtraIdPlacementInRankNodes(rList, sponsorNodeIdInR);
         const parentIdNum = Number(placement.parentId) || 1;
+        const maxId = rList.reduce((m, n) => Math.max(m, n.id), 0);
+        const nextIdInRank = maxId + 1;
 
         const newNode: IndexedTreeNode = {
           id: nextIdInRank,
-          rank: rankNum,
-          owner: ownerAddr,
-          directSponsor: mainNodeR1?.directSponsor || matrixDB.systemWallets.rootOwner,
+          rank: r,
+          owner: mainNodeR1.owner || ownerAddr,
+          directSponsor: sponsorAddr,
           parentId: parentIdNum,
           leftChild: 0,
           rightChild: 0,
@@ -3338,50 +3478,103 @@ async function startApp() {
           isExtraId: false,
           originMainId: mainIdNum,
           cloneRound: 0,
-          directSponsorNodeId: mainNodeR1?.directSponsorNodeId || 1,
+          directSponsorNodeId: r1SponsorMainId,
           nodeVault: 0,
           rawNodeVault: 0,
+          reconciledBaseVault: 0,
+          isLocalUpgrade: true,
         };
 
         rList.push(newNode);
-        reconcileRankTreeLinks(rList);
-        matrixDB.rankCounts[rankNum] = rList.length;
+        const parentNode = rList.find((n) => n.id === parentIdNum);
+        const rightSlotTriggerQueue: IndexedTreeNode[] = [];
 
-        const rankPrice = RANK_PRICES_USDT[rankNum - 1] || 10;
-        const upgradeLogItem: UpgradeLogModel = {
-          id: `db-upgrade-r${rankNum}-n${nextIdInRank}-${Date.now()}`,
-          mainNodeId: String(mainIdNum),
-          owner: ownerAddr,
-          fromRank: rankNum - 1,
-          toRank: rankNum,
-          newNodeId: String(nextIdInRank),
-          parentId: String(parentIdNum),
-          side: placement.isLeft ? 'LEFT' : 'RIGHT',
-          directSponsor: mainNodeR1?.directSponsor || matrixDB.systemWallets.rootOwner,
-          directSponsorNodeId: '1',
-          rankPriceUsdt: rankPrice.toFixed(2),
-          vaultDeductedUsdt: rankPrice.toFixed(2),
-          walletPaidUsdt: '0.00',
-          upgradeMode: 'AUTO_VAULT',
-          txHash: `0xupg${Date.now().toString(16)}${Math.random().toString(16).substring(2, 8)}`,
-          blockNumber: matrixDB.lastSyncedBlock || 140018600,
-          createdAt: new Date().toISOString(),
-        };
+        if (parentNode) {
+          if (placement.isLeft) {
+            parentNode.leftChild = nextIdInRank;
+            const pMainId =
+              parentNode.originMainId && parentNode.originMainId > 0
+                ? parentNode.originMainId
+                : parentNode.id;
+            const pMainNode = rList.find((n) => n.id === pMainId) || parentNode;
+            const vaultAdd = Number((rankPrice * 0.35).toFixed(4));
+            pMainNode.nodeVault = Number(((pMainNode.nodeVault || 0) + vaultAdd).toFixed(4));
+            pMainNode.rawNodeVault = Number(((pMainNode.rawNodeVault || 0) + vaultAdd).toFixed(4));
+            pMainNode.reconciledBaseVault = pMainNode.nodeVault;
+          } else {
+            parentNode.rightChild = nextIdInRank;
+            rightSlotTriggerQueue.push(parentNode);
+          }
+        }
 
-        if (!matrixDB.upgradeLogs) matrixDB.upgradeLogs = [];
-        matrixDB.upgradeLogs.unshift(upgradeLogItem);
-        inMemoryDB.upgradeLogs = matrixDB.upgradeLogs;
+        // Trigger 100% Rebirth clone if placed on the right
+        let cloneSafety = 0;
+        while (rightSlotTriggerQueue.length > 0 && cloneSafety < 25) {
+          cloneSafety++;
+          const triggerParent = rightSlotTriggerQueue.shift()!;
+          const clonePlacement = findClonePlacementInRankNodes(rList, triggerParent);
+          const nextCloneId = rList.reduce((m, n) => Math.max(m, n.id), 0) + 1;
+          const originNode =
+            rList.find((n) => n.id === clonePlacement.cloneOriginMainId) || triggerParent;
 
-        saveMatrixDBToDisk(true);
+          const newCloneNode: IndexedTreeNode = {
+            id: nextCloneId,
+            rank: r,
+            owner: triggerParent.owner,
+            directSponsor:
+              originNode.directSponsor || triggerParent.directSponsor || triggerParent.owner,
+            parentId: clonePlacement.parentId,
+            leftChild: 0,
+            rightChild: 0,
+            isClone: true,
+            isExtraId: false,
+            originMainId: clonePlacement.cloneOriginMainId,
+            cloneRound: clonePlacement.cloneRound,
+            directSponsorNodeId: clonePlacement.targetSponsorNodeId,
+            nodeVault: 0,
+            rawNodeVault: 0,
+            reconciledBaseVault: 0,
+            isLocalUpgrade: true,
+          };
+
+          rList.push(newCloneNode);
+          const cloneParent = rList.find((n) => n.id === clonePlacement.parentId);
+          if (cloneParent) {
+            if (clonePlacement.isLeft) {
+              cloneParent.leftChild = nextCloneId;
+              const cpMainId =
+                cloneParent.originMainId && cloneParent.originMainId > 0
+                  ? cloneParent.originMainId
+                  : cloneParent.id;
+              const cpMainNode = rList.find((n) => n.id === cpMainId) || cloneParent;
+              const vaultAdd = Number((rankPrice * 0.35).toFixed(4));
+              cpMainNode.nodeVault = Number(((cpMainNode.nodeVault || 0) + vaultAdd).toFixed(4));
+              cpMainNode.rawNodeVault = Number(((cpMainNode.rawNodeVault || 0) + vaultAdd).toFixed(4));
+              cpMainNode.reconciledBaseVault = cpMainNode.nodeVault;
+            } else {
+              cloneParent.rightChild = nextCloneId;
+              rightSlotTriggerQueue.push(cloneParent);
+            }
+          }
+        }
+
+        matrixDB.nodesByRank[r] = reconcileRankTreeLinks(rList);
+        matrixDB.rankCounts[r] = matrixDB.nodesByRank[r].length;
       }
+
+      reconcileAutoExtraIdsAcrossRanks();
+      rebuildDatabaseRewardLogsFromNodes();
+      rebuildDatabaseUpgradeLogsFromNodes();
+      saveMatrixDBToDisk(true);
 
       res.json({
         success: true,
         source: 'DATABASE_SIMULATION',
         mainId: mainIdNum,
+        fromRank: currentRank,
         targetRank: rankNum,
         txHash: `0xupg${Date.now().toString(16)}`,
-        message: `🚀 อัปเกรดรหัสหลัก #${mainIdNum} สู่ Rank ${rankNum} เรียบร้อยแล้ว`,
+        message: `🚀 อัปเกรดรหัสหลัก #${mainIdNum} สู่ Rank ${rankNum} สำเร็จเรียบร้อยแล้ว!`,
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -3407,12 +3600,14 @@ async function startApp() {
       return res.json({ success: true, found: false });
     }
 
-    let currentRank = 1;
-    for (let r = 27; r >= 1; r--) {
-      const list = matrixDB.nodesByRank[r] || [];
-      if (list.some((n) => n.owner.toLowerCase() === node!.owner.toLowerCase() && !n.isClone && !n.isExtraId)) {
-        currentRank = r;
-        break;
+    let currentRank = node.id === 1 ? 27 : 1;
+    if (node.id !== 1) {
+      for (let r = 27; r >= 2; r--) {
+        const list = matrixDB.nodesByRank[r] || [];
+        if (list.some((n) => !n.isClone && !n.isExtraId && n.originMainId === node!.id)) {
+          currentRank = r;
+          break;
+        }
       }
     }
 
@@ -3461,14 +3656,17 @@ async function startApp() {
 
       const mainIdNum = userR1Node ? userR1Node.id : 1;
       const sponsorAddr = userR1Node?.directSponsor || matrixDB.systemWallets.rootOwner;
+      const r1SponsorMainId = userR1Node?.directSponsorNodeId || 1;
 
-      // Determine current rank of user
-      let currentRank = 1;
-      for (let r = 27; r >= 1; r--) {
-        const list = matrixDB.nodesByRank[r] || [];
-        if (list.some((n) => n.owner.toLowerCase() === normalizedUser && !n.isClone && !n.isExtraId)) {
-          currentRank = r;
-          break;
+      // Determine current rank specifically for THIS Main ID (`mainIdNum`), not across the whole wallet
+      let currentRank = mainIdNum === 1 ? 27 : 1;
+      if (mainIdNum !== 1) {
+        for (let r = 27; r >= 2; r--) {
+          const list = (matrixDB.nodesByRank[r] || []).filter((n) => !n.isSyntheticExtra);
+          if (list.some((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum)) {
+            currentRank = r;
+            break;
+          }
         }
       }
 
@@ -3488,19 +3686,32 @@ async function startApp() {
 
       for (let r = currentRank + 1; r <= parsedRank; r++) {
         if (!matrixDB.nodesByRank[r]) matrixDB.nodesByRank[r] = [];
-        const rList = matrixDB.nodesByRank[r];
+        const rList = matrixDB.nodesByRank[r].filter((n) => !n.isSyntheticExtra);
+        matrixDB.nodesByRank[r] = rList;
 
-        // Check if already in rank
-        let existingNode = rList.find((n) => n.owner.toLowerCase() === normalizedUser && !n.isClone && !n.isExtraId);
+        // Check if THIS Main ID is already in rank `r`
+        const existingNode = rList.find(
+          (n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum
+        );
         if (!existingNode) {
-          const nextIdInRank = rList.length + 1;
-          const placement = await simulateFindPlacement(r, sponsorAddr, 0);
+          const spNodeInR =
+            rList.find(
+              (n) =>
+                !n.isClone &&
+                !n.isExtraId &&
+                (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
+            ) || rList[0];
+          const sponsorNodeIdInR = spNodeInR ? spNodeInR.id : 1;
+
+          const placement = findExtraIdPlacementInRankNodes(rList, sponsorNodeIdInR);
           const parentIdNum = Number(placement.parentId) || 1;
+          const maxId = rList.reduce((m, n) => Math.max(m, n.id), 0);
+          const nextIdInRank = maxId + 1;
 
           const newNode: IndexedTreeNode = {
             id: nextIdInRank,
             rank: r,
-            owner: normalizedUser,
+            owner: userR1Node?.owner || normalizedUser,
             directSponsor: sponsorAddr,
             parentId: parentIdNum,
             leftChild: 0,
@@ -3509,74 +3720,78 @@ async function startApp() {
             isExtraId: false,
             originMainId: mainIdNum,
             cloneRound: 0,
-            directSponsorNodeId: userR1Node?.directSponsorNodeId || 1,
+            directSponsorNodeId: r1SponsorMainId,
             nodeVault: 0,
             rawNodeVault: 0,
+            reconciledBaseVault: 0,
+            isLocalUpgrade: true,
           };
 
           rList.push(newNode);
-          reconcileRankTreeLinks(rList);
-          matrixDB.rankCounts[r] = rList.length;
-
-          // ถ้าลงฝั่งขวา (!placement.isLeft) -> รันระบบโคลนนิ่ง Rebirth ให้ Parent ตามเงื่อนไข!
-          if (!placement.isLeft) {
-            const parentNode = rList.find((n) => n.id === parentIdNum);
-            if (parentNode) {
-              const clonePlacement = await simulateFindPlacement(r, parentNode.owner, 0);
-              const cloneIdInRank = rList.length + 1;
-              const cloneNode: IndexedTreeNode = {
-                id: cloneIdInRank,
-                rank: r,
-                owner: parentNode.owner,
-                directSponsor: parentNode.directSponsor,
-                parentId: Number(clonePlacement.parentId) || 1,
-                leftChild: 0,
-                rightChild: 0,
-                isClone: true,
-                isExtraId: false,
-                originMainId: parentNode.originMainId || parentNode.id,
-                cloneRound: (parentNode.cloneRound || 0) + 1,
-                directSponsorNodeId: parentNode.id,
-                nodeVault: 0,
-                rawNodeVault: 0,
-              };
-              rList.push(cloneNode);
-              reconcileRankTreeLinks(rList);
-              matrixDB.rankCounts[r] = rList.length;
-              clonesCreated++;
+          const parentNode = rList.find((n) => n.id === parentIdNum);
+          const rightSlotTriggerQueue: IndexedTreeNode[] = [];
+          if (parentNode) {
+            if (placement.isLeft) {
+              parentNode.leftChild = nextIdInRank;
+            } else {
+              parentNode.rightChild = nextIdInRank;
+              rightSlotTriggerQueue.push(parentNode);
             }
           }
 
-          // บันทึก Upgrade Log (แบบ ADMIN_FREE: ไม่จ่ายค่าคอม และฟรี)
-          const upgradeLogItem: UpgradeLogModel = {
-            id: `db-upgrade-admin-r${r}-n${nextIdInRank}-${Date.now()}`,
-            mainNodeId: String(mainIdNum),
-            owner: normalizedUser,
-            fromRank: r - 1,
-            toRank: r,
-            newNodeId: String(nextIdInRank),
-            parentId: String(parentIdNum),
-            side: placement.isLeft ? 'LEFT' : 'RIGHT',
-            directSponsor: sponsorAddr,
-            directSponsorNodeId: String(userR1Node?.directSponsorNodeId || 1),
-            rankPriceUsdt: '0.00',
-            vaultDeductedUsdt: '0.00',
-            walletPaidUsdt: '0.00',
-            upgradeMode: 'ADMIN_FREE' as any,
-            txHash: `0xadmin${Date.now().toString(16)}`,
-            blockNumber: matrixDB.lastSyncedBlock || 140018600,
-            createdAt: new Date().toISOString(),
-          };
+          // ถ้าลงฝั่งขวา (!placement.isLeft) -> รันระบบโคลนนิ่ง Rebirth ให้ Parent ตามเงื่อนไข!
+          let cloneSafety = 0;
+          while (rightSlotTriggerQueue.length > 0 && cloneSafety < 25) {
+            cloneSafety++;
+            const triggerParent = rightSlotTriggerQueue.shift()!;
+            const clonePlacement = findClonePlacementInRankNodes(rList, triggerParent);
+            const cloneIdInRank = rList.reduce((m, n) => Math.max(m, n.id), 0) + 1;
+            const originNode =
+              rList.find((n) => n.id === clonePlacement.cloneOriginMainId) || triggerParent;
 
-          if (!matrixDB.upgradeLogs) matrixDB.upgradeLogs = [];
-          matrixDB.upgradeLogs.unshift(upgradeLogItem);
-          inMemoryDB.upgradeLogs = matrixDB.upgradeLogs;
+            const cloneNode: IndexedTreeNode = {
+              id: cloneIdInRank,
+              rank: r,
+              owner: triggerParent.owner,
+              directSponsor:
+                originNode.directSponsor || triggerParent.directSponsor || triggerParent.owner,
+              parentId: clonePlacement.parentId,
+              leftChild: 0,
+              rightChild: 0,
+              isClone: true,
+              isExtraId: false,
+              originMainId: clonePlacement.cloneOriginMainId,
+              cloneRound: clonePlacement.cloneRound,
+              directSponsorNodeId: clonePlacement.targetSponsorNodeId,
+              nodeVault: 0,
+              rawNodeVault: 0,
+              reconciledBaseVault: 0,
+              isLocalUpgrade: true,
+            };
+            rList.push(cloneNode);
+            clonesCreated++;
+            const cloneParent = rList.find((n) => n.id === clonePlacement.parentId);
+            if (cloneParent) {
+              if (clonePlacement.isLeft) {
+                cloneParent.leftChild = cloneIdInRank;
+              } else {
+                cloneParent.rightChild = cloneIdInRank;
+                rightSlotTriggerQueue.push(cloneParent);
+              }
+            }
+          }
+
+          matrixDB.nodesByRank[r] = reconcileRankTreeLinks(rList);
+          matrixDB.rankCounts[r] = matrixDB.nodesByRank[r].length;
 
           upgradedRanks.push(r);
           createdNodes.push({ rank: r, nodeId: nextIdInRank, side: placement.isLeft ? 'LEFT' : 'RIGHT' });
         }
       }
 
+      reconcileAutoExtraIdsAcrossRanks();
+      rebuildDatabaseRewardLogsFromNodes();
+      rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
 
       res.json({

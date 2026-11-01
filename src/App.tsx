@@ -129,10 +129,19 @@ export default function App() {
     };
 
     fetchMainIdVaultsFromDB();
+    const handleTreeRefresh = () => {
+      fetchMainIdVaultsFromDB();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('matrix:tree:refresh', handleTreeRefresh);
+    }
     const interval = setInterval(fetchMainIdVaultsFromDB, 6000);
     return () => {
       isMounted = false;
       clearInterval(interval);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('matrix:tree:refresh', handleTreeRefresh);
+      }
     };
   }, [selectedMainId, contractAddress, account, profile?.mainNodeIdRank1, profile?.currentMaxRank]);
 

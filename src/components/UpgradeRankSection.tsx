@@ -95,7 +95,7 @@ export const UpgradeRankSection: React.FC<UpgradeRankSectionProps> = ({
     if (nextR <= 10) setTierGroupTab('Starter (1-10)');
     else if (nextR <= 20) setTierGroupTab('Growth (11-20)');
     else setTierGroupTab('Whale (21-27)');
-  }, [currentRank]);
+  }, [currentRank, selectedMainId]);
 
   const targetRankDef = RANK_DEFINITIONS.find((r) => r.rank === selectedRank);
 

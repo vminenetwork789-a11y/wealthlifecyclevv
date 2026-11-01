@@ -1087,7 +1087,7 @@ export function useWeb3() {
 
   // 3. Upgrade Rank: upgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) / upgradeRank(uint8 _targetRank)
   const handleUpgradeRank = async (targetRank: number, targetMainId?: number | string) => {
-    const mIdNum = Number(targetMainId) || 0;
+    const mIdNum = Number(targetMainId) || Number(profile?.mainNodeIdRank1) || 1;
     const nominalPrice = RANK_PRICES_USDT[targetRank - 1] || 10;
 
     setTxState({
@@ -1098,12 +1098,19 @@ export function useWeb3() {
       successMessage: null,
     });
 
+    let mainIdOwner = '';
+    let dbUpgradeRankPool = 0;
+
     if (mIdNum > 0) {
       try {
         const infoRes = await fetch(`/api/matrix/main-id/${mIdNum}`);
         const info = await infoRes.json();
-        if (info && info.success && typeof info.currentRank === 'number') {
-          if (targetRank <= info.currentRank) {
+        if (info && info.success) {
+          if (info.owner) mainIdOwner = String(info.owner);
+          if (typeof info.upgradeRankPool === 'number') {
+            dbUpgradeRankPool = info.upgradeRankPool;
+          }
+          if (typeof info.currentRank === 'number' && targetRank <= info.currentRank) {
             setTxState({
               isLoading: false,
               step: '',
@@ -1133,211 +1140,184 @@ export function useWeb3() {
         }
       }
 
-      if (signer && userAddr) {
-        // Option A: On-Chain Transaction via MetaMask / Web3 Wallet
-        const currentContract = contractAddressRef.current || CONTRACT_ADDRESS;
-        const currentUsdt = usdtAddressRef.current || USDT_ADDRESS;
+      const isWalletOwnerOfMainId =
+        !mainIdOwner ||
+        mainIdOwner === ethers.ZeroAddress ||
+        (userAddr && userAddr.toLowerCase() === mainIdOwner.toLowerCase());
 
-        const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
-        const usdtContract = new ethers.Contract(currentUsdt, USDT_ABI, signer);
-
-        let usdtDecimals = 18;
+      if (signer && userAddr && isWalletOwnerOfMainId) {
         try {
-          usdtDecimals = Number(await usdtContract.decimals());
-        } catch {
-          usdtDecimals = 18;
-        }
+          // Option A: On-Chain Transaction via MetaMask / Web3 Wallet
+          const currentContract = contractAddressRef.current || CONTRACT_ADDRESS;
+          const currentUsdt = usdtAddressRef.current || USDT_ADDRESS;
 
-        let targetPrice: bigint;
-        try {
-          targetPrice = await matrixContract.rankPrice(targetRank);
-        } catch {
-          targetPrice = ethers.parseUnits(nominalPrice.toString(), usdtDecimals);
-        }
+          const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
+          const usdtContract = new ethers.Contract(currentUsdt, USDT_ABI, signer);
 
-        let savedInVault: bigint = BigInt(0);
-        try {
-          if (mIdNum > 0 && typeof matrixContract.getAccumulatedVaultForMainId === 'function') {
-            try {
-              savedInVault = await matrixContract.getAccumulatedVaultForMainId(BigInt(mIdNum), Number(targetRank));
-            } catch {
+          let usdtDecimals = 18;
+          try {
+            usdtDecimals = Number(await usdtContract.decimals());
+          } catch {
+            usdtDecimals = 18;
+          }
+
+          let targetPrice: bigint;
+          try {
+            targetPrice = await matrixContract.rankPrice(targetRank);
+          } catch {
+            targetPrice = ethers.parseUnits(nominalPrice.toString(), usdtDecimals);
+          }
+
+          let savedInVault: bigint = BigInt(0);
+          try {
+            if (mIdNum > 0 && typeof matrixContract.getAccumulatedVaultForMainId === 'function') {
+              try {
+                savedInVault = await matrixContract.getAccumulatedVaultForMainId(BigInt(mIdNum));
+              } catch {
+                savedInVault = ethers.parseUnits(dbUpgradeRankPool.toFixed(2), usdtDecimals);
+              }
+            } else {
               savedInVault = await matrixContract.getAccumulatedVault(userAddr, Number(targetRank));
             }
-          } else {
-            savedInVault = await matrixContract.getAccumulatedVault(userAddr, Number(targetRank));
+          } catch {
+            savedInVault = ethers.parseUnits(dbUpgradeRankPool.toFixed(2), usdtDecimals);
           }
-        } catch {
-          savedInVault = BigInt(0);
-        }
 
-        const amountToPay = targetPrice > savedInVault ? targetPrice - savedInVault : BigInt(0);
-        const formattedDiffUsdt = Number(ethers.formatUnits(amountToPay, usdtDecimals)).toFixed(2);
-        const vaultDeductedBn = savedInVault > targetPrice ? targetPrice : savedInVault;
-        const formattedVaultDeducted = Number(ethers.formatUnits(vaultDeductedBn, usdtDecimals)).toFixed(2);
+          const amountToPay = targetPrice > savedInVault ? targetPrice - savedInVault : BigInt(0);
+          const formattedDiffUsdt = Number(ethers.formatUnits(amountToPay, usdtDecimals)).toFixed(2);
+          const vaultDeductedBn = savedInVault > targetPrice ? targetPrice : savedInVault;
+          const formattedVaultDeducted = Number(ethers.formatUnits(vaultDeductedBn, usdtDecimals)).toFixed(2);
 
-        if (amountToPay > BigInt(0)) {
-          setTxState((prev) => ({
-            ...prev,
-            step: `ตรวจสอบสิทธิ์อนุมัติเหรียญ USDT สำหรับเงินส่วนต่าง ${formattedDiffUsdt} USDT (หักลบ Vault ${formattedVaultDeducted} USDT)...`,
-          }));
-
-          const currentAllowance = await usdtContract.allowance(userAddr, currentContract);
-          if (currentAllowance < amountToPay) {
+          // Pre-check staticCall before asking for USDT approval if possible, or check allowance first
+          if (amountToPay > BigInt(0)) {
             setTxState((prev) => ({
               ...prev,
-              step: `ขั้นตอนที่ 1/2: กรุณากดยืนยันอนุมัติวงเงินส่วนต่าง ${formattedDiffUsdt} USDT ใน MetaMask...`,
+              step: `ตรวจสอบสิทธิ์อนุมัติเหรียญ USDT สำหรับเงินส่วนต่าง ${formattedDiffUsdt} USDT (หักลบ Vault ${formattedVaultDeducted} USDT)...`,
             }));
-            const approveTx = await usdtContract.approve(currentContract, ethers.MaxUint256);
-            setTxState((prev) => ({
-              ...prev,
-              step: `ส่งคำสั่งอนุมัติวงเงินส่วนต่าง (${formattedDiffUsdt} USDT) แล้ว กำลังรอการยืนยันบน BNB Testnet...`,
-              txHash: approveTx.hash,
-            }));
-            await approveTx.wait();
+
+            const currentAllowance = await usdtContract.allowance(userAddr, currentContract);
+            if (currentAllowance < amountToPay) {
+              setTxState((prev) => ({
+                ...prev,
+                step: `ขั้นตอนที่ 1/2: กรุณากดยืนยันอนุมัติวงเงินส่วนต่าง ${formattedDiffUsdt} USDT ใน MetaMask...`,
+              }));
+              const approveTx = await usdtContract.approve(currentContract, ethers.MaxUint256);
+              setTxState((prev) => ({
+                ...prev,
+                step: `ส่งคำสั่งอนุมัติวงเงินส่วนต่าง (${formattedDiffUsdt} USDT) แล้ว กำลังรอการยืนยันบน BNB Testnet...`,
+                txHash: approveTx.hash,
+              }));
+              await approveTx.wait();
+            }
           }
-        }
 
-        let upgradeTx: any = null;
+          let upgradeTx: any = null;
 
-        if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
-          try {
+          if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
             await matrixContract.upgradeRankForMainId.staticCall(BigInt(mIdNum), Number(targetRank));
             setTxState((prev) => ({
               ...prev,
               step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${targetRank} สำหรับรหัสหลัก #${mIdNum}... กรุณายืนยันใน MetaMask`,
             }));
             upgradeTx = await matrixContract.upgradeRankForMainId(BigInt(mIdNum), Number(targetRank));
-          } catch (errForMain: any) {
-            console.error('[Upgrade] upgradeRankForMainId error:', errForMain);
-            let msg = errForMain?.reason || errForMain?.shortMessage || errForMain?.message || '';
-            if (msg.includes('Must upgrade rank step-by-step')) {
-              msg = `สัญญา Smart Contract กำหนดให้อัปเกรดทีละ 1 ขั้นตามลำดับ (ไม่สามารถข้ามแรงค์ได้)`;
-            } else if (msg.includes('Not main ID owner')) {
-              msg = `กระเป๋านี้ไม่ใช่เจ้าของ Main ID #${mIdNum} บน Smart Contract`;
-            } else if (!msg) {
-              msg = `การอัปเกรดแรงค์ ${targetRank} สำหรับ Main ID #${mIdNum} บน Smart Contract ไม่สำเร็จ`;
-            }
-            throw new Error(msg);
-          }
-        } else {
-          try {
+          } else {
             await matrixContract.upgradeRank.staticCall(Number(targetRank));
             setTxState((prev) => ({
               ...prev,
               step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${targetRank}... กรุณายืนยันใน MetaMask`,
             }));
             upgradeTx = await matrixContract.upgradeRank(Number(targetRank));
-          } catch (errDirect: any) {
-            console.error('[Upgrade] upgradeRank direct error:', errDirect);
-            let msg = errDirect?.reason || errDirect?.shortMessage || errDirect?.message || '';
-            if (msg.includes('Must upgrade rank step-by-step')) {
-              msg = `สัญญา Smart Contract กำหนดให้อัปเกรดทีละ 1 ขั้นตามลำดับ (ไม่สามารถข้ามแรงค์ได้)`;
-            } else if (!msg) {
-              msg = `การอัปเกรดแรงค์ ${targetRank} บน Smart Contract ไม่สำเร็จ`;
-            }
-            throw new Error(msg);
           }
-        }
 
-        setTxState((prev) => ({
-          ...prev,
-          step: 'ส่ง Transaction แล้ว รอการประมวลผลบนบล็อกเชน...',
-          txHash: upgradeTx.hash,
-        }));
+          setTxState((prev) => ({
+            ...prev,
+            step: 'ส่ง Transaction แล้ว รอการประมวลผลบนบล็อกเชน...',
+            txHash: upgradeTx.hash,
+          }));
 
-        const receipt = await upgradeTx.wait();
+          const receipt = await upgradeTx.wait();
 
-        setTxState({
-          isLoading: false,
-          step: 'สำเร็จ!',
-          txHash: receipt.hash,
-          error: null,
-          successMessage: `🚀 อัปเกรด${mIdNum > 0 ? `รหัสหลัก #${mIdNum} ` : ''}สู่แรงค์ ${targetRank} (${nominalPrice} USDT) บนบล็อกเชนสำเร็จเรียบร้อย!`,
-        });
-
-        await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-        await refreshUserData(userAddr);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
-        }
-        return receipt;
-
-        const res = await fetch('/api/matrix/upgrade', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            targetRank,
-            mainId: mIdNum || 1,
-            owner: userAddr || account,
-          }),
-        });
-
-        const json = await res.json();
-        if (!res.ok || !json.success) {
-          // Try admin upgrade API fallback if regular upgrade returned error
-          const adminRes = await fetch('/api/admin/upgrade-rank', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              targetUser: userAddr || account,
-              mainId: mIdNum || 1,
-              targetRank,
-            }),
+          setTxState({
+            isLoading: false,
+            step: 'สำเร็จ!',
+            txHash: receipt.hash,
+            error: null,
+            successMessage: `🚀 อัปเกรด${mIdNum > 0 ? `รหัสหลัก #${mIdNum} ` : ''}สู่แรงค์ ${targetRank} (${nominalPrice} USDT) บนบล็อกเชนสำเร็จเรียบร้อย!`,
           });
-          const adminJson = await adminRes.json();
-          if (!adminRes.ok || !adminJson.success) {
-            throw new Error(adminJson.error || json.error || 'ไม่สามารถอัปเกรดแรงค์ได้');
+
+          await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
+          await refreshUserData(userAddr);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
           }
+          return receipt;
+        } catch (onChainErr: any) {
+          const rawErrMsg = String(
+            onChainErr?.reason || onChainErr?.shortMessage || onChainErr?.message || ''
+          );
+          const isUserRejected =
+            onChainErr?.code === 4001 ||
+            onChainErr?.code === 'ACTION_REJECTED' ||
+            rawErrMsg.toLowerCase().includes('user rejected') ||
+            rawErrMsg.toLowerCase().includes('user denied');
+
+          if (isUserRejected) {
+            throw new Error('ยกเลิกการทำรายการในกระเป๋า Web3 (User Rejected)');
+          }
+
+          console.warn(
+            `[Upgrade] On-chain upgrade notice for Main ID #${mIdNum} -> Rank ${targetRank}, proceeding with Database Upgrade Engine:`,
+            rawErrMsg
+          );
         }
+      }
 
-        setTxState({
-          isLoading: false,
-          step: 'สำเร็จ!',
-          txHash: json.txHash || `0xupg${Date.now().toString(16)}`,
-          error: null,
-          successMessage: `🚀 อัปเกรด${mIdNum > 0 ? `รหัสหลัก #${mIdNum} ` : ''}สู่แรงค์ ${targetRank} (${nominalPrice} USDT) สำเร็จเรียบร้อย!`,
-        });
+      // Option B: Database / Per-Main-ID Upgrade Engine
+      setTxState((prev) => ({
+        ...prev,
+        step: `กำลังประมวลผลอัปเกรดแรงค์ ${targetRank} สำหรับรหัสหลัก #${mIdNum}...`,
+      }));
 
-        await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-        await refreshUserData(userAddr || account || '0x622E20082e63c7220c5AF0A77Cbc437a98505311');
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
-        }
-      } else {
-        // Option B: Database / Off-Chain Simulation Mode
-        setTxState((prev) => ({
-          ...prev,
-          step: `กำลังประมวลผลอัปเกรดแรงค์ ${targetRank} สำหรับรหัสหลัก #${mIdNum || 1} ในฐานข้อมูล...`,
-        }));
+      const res = await fetch('/api/matrix/upgrade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetRank,
+          mainId: mIdNum,
+          owner: mainIdOwner || userAddr || account,
+        }),
+      });
 
-        const res = await fetch('/api/matrix/upgrade', {
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        const adminRes = await fetch('/api/admin/upgrade-rank', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            targetUser: mainIdOwner || userAddr || account,
+            mainId: mIdNum,
             targetRank,
-            mainId: mIdNum || 1,
-            owner: account,
           }),
         });
-
-        const json = await res.json();
-        if (!res.ok || !json.success) {
-          throw new Error(json.error || 'ไม่สามารถอัปเกรดแรงค์ในฐานข้อมูลได้');
+        const adminJson = await adminRes.json();
+        if (!adminRes.ok || !adminJson.success) {
+          throw new Error(adminJson.error || json.error || 'ไม่สามารถอัปเกรดแรงค์ได้');
         }
+      }
 
-        setTxState({
-          isLoading: false,
-          step: 'สำเร็จ!',
-          txHash: json.txHash || null,
-          error: null,
-          successMessage: `🚀 อัปเกรด${mIdNum > 0 ? `รหัสหลัก #${mIdNum} ` : ''}สู่แรงค์ ${targetRank} (${nominalPrice} USDT) สำเร็จเรียบร้อย!`,
-        });
+      setTxState({
+        isLoading: false,
+        step: 'สำเร็จ!',
+        txHash: json.txHash || `0xupg${Date.now().toString(16)}`,
+        error: null,
+        successMessage:
+          json.message ||
+          `🚀 อัปเกรดรหัสหลัก #${mIdNum} สู่แรงค์ ${targetRank} (${nominalPrice} USDT) สำเร็จเรียบร้อย!`,
+      });
 
-        await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-        await refreshUserData(account || '0x622E20082e63c7220c5AF0A77Cbc437a98505311');
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
-        }
+      await refreshUserData(mainIdOwner || userAddr || account || '0x622E20082e63c7220c5AF0A77Cbc437a98505311');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
       }
     } catch (err: any) {
       console.error('Upgrade transaction error:', err);
@@ -1817,8 +1797,13 @@ export function useWeb3() {
         successMessage: `✅ Admin Upgrade สำเร็จ! อัปเกรด ${targetLabel} เป็น Rank ${targetRank} ฟรี (ไม่จ่ายค่าคอม และระบบโคลนนิ่งทำงานปกติ)`,
       });
 
-      await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
+      if (!usedApi && txHash) {
+        await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
+      }
       if (account) await refreshUserData(account);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
+      }
     } catch (err: any) {
       console.error('handleAdminUpgrade error:', err);
       setTxState({

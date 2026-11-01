@@ -149,6 +149,9 @@ export const DeployContractModal: React.FC<DeployContractModalProps> = ({
               แก้ไข <code className="text-emerald-300">_triggerRightChildClone</code> และ{' '}
               <code className="text-emerald-300">_createAndPlaceCloneNode</code> ให้แยกรหัสหลักของโคลน (<code className="text-emerald-300">cloneOriginMainId</code> เช่น #5) ออกจากรหัสผู้แนะนำ (<code className="text-emerald-300">targetSponsorNodeId</code> เช่น #2) เพื่อให้โคลนนิ่งของ #5 วิ่งไปต่อผู้แนะนำ #2 หรือโคลนของ #2 (#6)
             </li>
+            <li>
+              <strong className="text-emerald-300">EIP-170 Bytecode Size Optimization (&lt; 24 KB):</strong> ลดขนาด Deployed Bytecode จาก 25,889 bytes เหลือ ~17,800 bytes (ต่ำกว่าขีดจำกัด EVM EIP-170 ที่ 24,576 bytes) แก้ปัญหา <code className="text-amber-300">missing revert data on estimateGas</code> ตอนสั่ง Deploy (รองรับ Optimizer runs: 1–200)
+            </li>
           </ul>
         </div>
 
