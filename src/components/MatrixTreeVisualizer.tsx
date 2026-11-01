@@ -1120,6 +1120,131 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         })
       );
 
+      // สำหรับการวางตำแหน่ง Rank 2-27:
+      // ตรวจสอบว่าผู้แนะนำตรง (Direct Sponsor ID เช่น ID #5) มีโหนดอยู่ใน Rank นั้นหรือยัง
+      // หากผู้แนะนำยังไม่ได้อัปเกรดขึ้นมาถึง Rank นั้น ให้หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา (BFS จาก Root #1)
+      const snapR1ForPlacement = multiRankSnapshots.get(1);
+      for (const [rNum, sMap] of multiRankSnapshots.entries()) {
+        if (rNum <= 1 || sMap.size <= 1) continue;
+        const sIds = Array.from(sMap.keys()).sort((a, b) => a - b);
+
+        for (const nid of sIds) {
+          if (nid <= 1) continue;
+          const node = sMap.get(nid)!;
+          if (node.isClone || node.isExtraId) continue;
+
+          let spMainId = node.directSponsorNodeId || 0;
+          if (spMainId <= 0 && node.originMainId > 1 && snapR1ForPlacement) {
+            const origR1 = snapR1ForPlacement.get(node.originMainId);
+            if (origR1 && origR1.directSponsorNodeId > 0) {
+              spMainId = origR1.directSponsorNodeId;
+            }
+          }
+          if (spMainId <= 1) continue;
+
+          const sponsorExistsBefore = sIds.some((prevId) => {
+            if (prevId >= nid) return false;
+            const prev = sMap.get(prevId);
+            if (!prev || prev.isClone || prev.isExtraId) return false;
+            return spMainId === 1 ? prev.id === 1 : prev.originMainId === spMainId;
+          });
+
+          if (!sponsorExistsBefore) {
+            const q: number[] = [1];
+            const vis = new Set<number>();
+            let shallowParentId = 1;
+            let shallowIsLeft = true;
+
+            while (q.length > 0) {
+              const curId = q.shift()!;
+              if (vis.has(curId)) continue;
+              vis.add(curId);
+              const cur = sMap.get(curId);
+              if (!cur || cur.id >= nid) continue;
+
+              const hasLeftBefore =
+                cur.leftChild > 0 &&
+                cur.leftChild < nid &&
+                sMap.has(cur.leftChild) &&
+                sMap.get(cur.leftChild)!.parentId === cur.id;
+              if (!hasLeftBefore) {
+                shallowParentId = cur.id;
+                shallowIsLeft = true;
+                break;
+              }
+
+              const hasRightBefore =
+                cur.rightChild > 0 &&
+                cur.rightChild < nid &&
+                sMap.has(cur.rightChild) &&
+                sMap.get(cur.rightChild)!.parentId === cur.id;
+              if (!hasRightBefore) {
+                shallowParentId = cur.id;
+                shallowIsLeft = false;
+                break;
+              }
+
+              q.push(cur.leftChild, cur.rightChild);
+            }
+
+            const shallowParent = sMap.get(shallowParentId);
+            if (shallowParent && node.parentId !== shallowParentId) {
+              const oldParent = sMap.get(node.parentId);
+              if (oldParent) {
+                if (oldParent.leftChild === nid) oldParent.leftChild = 0;
+                if (oldParent.rightChild === nid) oldParent.rightChild = 0;
+              }
+              node.parentId = shallowParentId;
+              if (shallowIsLeft) {
+                shallowParent.leftChild = nid;
+              } else {
+                shallowParent.rightChild = nid;
+              }
+
+              if (rNum === activeRank) {
+                const rawChild = rawNodes.get(nid);
+                const rawOldParent = oldParent ? rawNodes.get(oldParent.id) : undefined;
+                const rawNewParent = rawNodes.get(shallowParentId);
+                if (rawOldParent) {
+                  if (rawOldParent.leftChild === nid) rawOldParent.leftChild = 0;
+                  if (rawOldParent.rightChild === nid) rawOldParent.rightChild = 0;
+                }
+                if (rawChild && rawNewParent) {
+                  rawChild.parentId = shallowParentId;
+                  if (shallowIsLeft) rawNewParent.leftChild = nid;
+                  else rawNewParent.rightChild = nid;
+                }
+              }
+            }
+          }
+        }
+
+        // Cap nodeVault by actual leftChild count in Rank rNum so moved leftChild doesn't leave phantom vault
+        const rUnitVault = Number(((RANK_PRICES_USDT[rNum - 1] || 10) * 0.35).toFixed(4));
+        for (const m of sMap.values()) {
+          if (m.isClone || m.isExtraId) continue;
+          let leftCount = 0;
+          const mOrig = m.originMainId || m.id;
+          for (const cand of sMap.values()) {
+            const cOrig = cand.originMainId || cand.id;
+            if (
+              (cand.id === m.id || (cand.isClone && (cOrig === m.id || cOrig === mOrig))) &&
+              cand.leftChild > 0 &&
+              sMap.has(cand.leftChild)
+            ) {
+              leftCount++;
+            }
+          }
+          const maxPossible = Number((leftCount * rUnitVault).toFixed(4));
+          if ((m.nodeVault || 0) > maxPossible) {
+            m.nodeVault = maxPossible;
+            if (rNum === activeRank) {
+              onChainNodeVaultMap.set(m.id, maxPossible);
+            }
+          }
+        }
+      }
+
       // Ensure Pool 3 (Vault R4-27) -> Auto Extra IDs in Rank 2..27 are reconciled even when RPC fallback is used
       const snapR1Init = multiRankSnapshots.get(1);
       if (snapR1Init && snapR1Init.size > 0) {
@@ -1209,72 +1334,48 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 }
               }
 
-              // Find placement in targetSnapMap (1. under targetMainSnap, 2. under its clones, 3. BFS)
-              let pId = targetMainSnap.id;
-              let isLeftSlot = true;
-              if (!targetMainSnap.leftChild || !targetSnapMap.has(targetMainSnap.leftChild)) {
-                pId = targetMainSnap.id;
-                isLeftSlot = true;
-              } else if (!targetMainSnap.rightChild || !targetSnapMap.has(targetMainSnap.rightChild)) {
-                pId = targetMainSnap.id;
-                isLeftSlot = false;
-              } else {
-                let foundSlot = false;
-                const sortedT = Array.from(targetSnapMap.values()).sort((a, b) => a.id - b.id);
-                for (const cand of sortedT) {
-                  if (!cand.isClone || (cand.originMainId || cand.id) !== targetMainSnap.id) continue;
-                  if (!cand.leftChild || !targetSnapMap.has(cand.leftChild)) {
-                    pId = cand.id;
-                    isLeftSlot = true;
-                    foundSlot = true;
-                    break;
+              const findBfsFromRoot = (
+                sMap: Map<number, RankNodeSnapshot>
+              ): { parentId: number; isLeft: boolean } => {
+                const q = [1];
+                const vis = new Set<number>();
+                while (q.length > 0) {
+                  const cur = q.shift()!;
+                  if (vis.has(cur)) continue;
+                  vis.add(cur);
+                  const cn = sMap.get(cur);
+                  if (!cn) continue;
+                  if (!cn.leftChild || !sMap.has(cn.leftChild)) {
+                    return { parentId: cn.id, isLeft: true };
                   }
-                  if (!cand.rightChild || !targetSnapMap.has(cand.rightChild)) {
-                    pId = cand.id;
-                    isLeftSlot = false;
-                    foundSlot = true;
-                    break;
+                  if (!cn.rightChild || !sMap.has(cn.rightChild)) {
+                    return { parentId: cn.id, isLeft: false };
                   }
+                  q.push(cn.leftChild, cn.rightChild);
                 }
-                if (!foundSlot) {
-                  const q = [targetMainSnap.id];
-                  const vis = new Set<number>();
-                  while (q.length > 0) {
-                    const cur = q.shift()!;
-                    if (vis.has(cur)) continue;
-                    vis.add(cur);
-                    const cn = targetSnapMap.get(cur);
-                    if (!cn) continue;
-                    if (!cn.leftChild || !targetSnapMap.has(cn.leftChild)) {
-                      pId = cn.id;
-                      isLeftSlot = true;
-                      break;
-                    }
-                    if (!cn.rightChild || !targetSnapMap.has(cn.rightChild)) {
-                      pId = cn.id;
-                      isLeftSlot = false;
-                      break;
-                    }
-                    q.push(cn.leftChild, cn.rightChild);
-                  }
-                }
-              }
+                return { parentId: 1, isLeft: true };
+              };
 
               const findSnapSlotUnderMain = (
                 sMap: Map<number, RankNodeSnapshot>,
-                sponsorMainId: number
+                sponsorNodeInRankId: number
               ): { parentId: number; isLeft: boolean } => {
-                const mSnap = sMap.get(sponsorMainId) || sMap.get(1);
-                if (!mSnap) return { parentId: 1, isLeft: true };
+                if (!sponsorNodeInRankId || sponsorNodeInRankId <= 0 || !sMap.has(sponsorNodeInRankId)) {
+                  return findBfsFromRoot(sMap);
+                }
+                const mSnap = sMap.get(sponsorNodeInRankId)!;
                 if (!mSnap.leftChild || !sMap.has(mSnap.leftChild)) {
                   return { parentId: mSnap.id, isLeft: true };
                 }
                 if (!mSnap.rightChild || !sMap.has(mSnap.rightChild)) {
                   return { parentId: mSnap.id, isLeft: false };
                 }
+                const mOriginTag = mSnap.originMainId || mSnap.id;
                 const sArr = Array.from(sMap.values()).sort((a, b) => a.id - b.id);
                 for (const cand of sArr) {
-                  if (!cand.isClone || (cand.originMainId || cand.id) !== mSnap.id) continue;
+                  if (!cand.isClone) continue;
+                  const cOrig = cand.originMainId || cand.id;
+                  if (cOrig !== mSnap.id && cOrig !== mOriginTag) continue;
                   if (!cand.leftChild || !sMap.has(cand.leftChild)) {
                     return { parentId: cand.id, isLeft: true };
                   }
@@ -1301,6 +1402,16 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 return { parentId: mSnap.id, isLeft: true };
               };
 
+              // ตรวจสอบว่า Direct Sponsor ID มีโหนดอยู่ใน targetR หรือยัง
+              const r1SponsorId = r1Node.directSponsorNodeId > 0 ? r1Node.directSponsorNodeId : 1;
+              const sponsorNodeInTarget = getCorrespInit(r1SponsorId, r1Node.directSponsor, targetR);
+              const extraSlot =
+                sponsorNodeInTarget > 0
+                  ? findSnapSlotUnderMain(targetSnapMap, sponsorNodeInTarget)
+                  : findBfsFromRoot(targetSnapMap);
+              const pId = extraSlot.parentId;
+              const isLeftSlot = extraSlot.isLeft;
+
               const findSnapClonePlacement = (
                 sMap: Map<number, RankNodeSnapshot>,
                 trigParent: RankNodeSnapshot
@@ -1318,61 +1429,51 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   (sn) => sn.isClone && (sn.originMainId || sn.id) === cloneOriginMainId
                 ).length;
                 const roundIndex = existingClonesCount % 2;
-                const origSnap = sMap.get(cloneOriginMainId) || trigParent;
-                let targetSponsorNodeId = 1;
-                if (cloneOriginMainId === 1) {
-                  targetSponsorNodeId = 1;
-                } else if (origSnap.directSponsorNodeId && origSnap.directSponsorNodeId > 0) {
-                  targetSponsorNodeId = origSnap.directSponsorNodeId;
+                const origSnap =
+                  Array.from(sMap.values()).find(
+                    (sn) =>
+                      !sn.isClone &&
+                      !sn.isExtraId &&
+                      (cloneOriginMainId === 1 ? sn.id === 1 : sn.originMainId === cloneOriginMainId)
+                  ) ||
+                  sMap.get(cloneOriginMainId) ||
+                  trigParent;
+
+                let savedDirectSponsorId = origSnap.directSponsorNodeId || 1;
+                let sponsorNodeInRankId = 0;
+
+                if (cloneOriginMainId === 1 || origSnap.id === 1) {
+                  savedDirectSponsorId = 1;
+                  sponsorNodeInRankId = 1;
                 } else {
-                  const spKey = (origSnap.directSponsor || '').toLowerCase();
-                  const spMain = Array.from(sMap.values()).find(
-                    (sn) => !sn.isClone && !sn.isExtraId && (sn.owner || '').toLowerCase() === spKey
+                  savedDirectSponsorId = origSnap.directSponsorNodeId || 1;
+                  const spNodeInR = Array.from(sMap.values()).find(
+                    (sn) =>
+                      !sn.isClone &&
+                      !sn.isExtraId &&
+                      (savedDirectSponsorId === 1
+                        ? sn.id === 1
+                        : sn.originMainId === savedDirectSponsorId)
                   );
-                  targetSponsorNodeId = spMain ? spMain.id : 1;
+                  sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
                 }
 
-                if (roundIndex === 0) {
-                  const slot = findSnapSlotUnderMain(sMap, targetSponsorNodeId);
+                if (roundIndex === 0 && sponsorNodeInRankId > 0 && sMap.has(sponsorNodeInRankId)) {
+                  const slot = findSnapSlotUnderMain(sMap, sponsorNodeInRankId);
                   return {
                     parentId: slot.parentId,
                     isLeft: slot.isLeft,
                     cloneOriginMainId,
-                    targetSponsorNodeId,
+                    targetSponsorNodeId: savedDirectSponsorId,
                   };
                 }
 
-                const q = [1];
-                const vis = new Set<number>();
-                while (q.length > 0) {
-                  const cur = q.shift()!;
-                  if (vis.has(cur)) continue;
-                  vis.add(cur);
-                  const cn = sMap.get(cur);
-                  if (!cn) continue;
-                  if (!cn.leftChild || !sMap.has(cn.leftChild)) {
-                    return {
-                      parentId: cn.id,
-                      isLeft: true,
-                      cloneOriginMainId,
-                      targetSponsorNodeId,
-                    };
-                  }
-                  if (!cn.rightChild || !sMap.has(cn.rightChild)) {
-                    return {
-                      parentId: cn.id,
-                      isLeft: false,
-                      cloneOriginMainId,
-                      targetSponsorNodeId,
-                    };
-                  }
-                  q.push(cn.leftChild, cn.rightChild);
-                }
+                const bfsSlot = findBfsFromRoot(sMap);
                 return {
-                  parentId: 1,
-                  isLeft: true,
+                  parentId: bfsSlot.parentId,
+                  isLeft: bfsSlot.isLeft,
                   cloneOriginMainId,
-                  targetSponsorNodeId,
+                  targetSponsorNodeId: savedDirectSponsorId,
                 };
               };
 
@@ -1381,14 +1482,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               const newSnap: RankNodeSnapshot = {
                 id: newExtraId,
                 owner: r1Node.owner,
-                directSponsor: r1Node.owner,
+                directSponsor: r1Node.directSponsor || r1Node.owner,
                 parentId: pId,
                 leftChild: 0,
                 rightChild: 0,
                 isClone: false,
                 isExtraId: true,
                 originMainId: newExtraId,
-                directSponsorNodeId: targetMainSnap.id,
+                directSponsorNodeId: r1SponsorId,
                 nodeVault: 0,
               };
               targetSnapMap.set(newExtraId, newSnap);
@@ -2105,66 +2206,53 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
         // 1. Check if this node was spawned as an Auto New Main ID from Pool 2 (Vault R1-3 ลบ 5 rank ย้อนหลัง)
         if (!n.isClone && !n.isExtraId && n.id > firstMainOfOwner) {
-          const isSelfSponsored = Boolean(
-            n.directSponsor && n.directSponsor.toLowerCase() === ownerKey
-          );
-          if (isSelfSponsored) {
-            const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
-            const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter(
-              (mId) =>
-                mId < n.id &&
-                (explicitSponsorId === 0 || mId === explicitSponsorId) &&
-                getMainIdWindow5Start(mId, n.owner) > 1
+          const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
+          const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter((mId) => {
+            if (mId >= n.id) return false;
+            if (getMainIdWindow5Start(mId, n.owner) <= 1) return false;
+            const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
+            const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
+            if (currentSpawns >= maxAllowedSpawns) return false;
+            const mSponsorId = onChainSponsorNodeMap.get(mId) || 0;
+            const isSelfSponsored = Boolean(
+              n.directSponsor && n.directSponsor.toLowerCase() === ownerKey
             );
-            let sourceMain = priorMains.find((mId) => {
-              const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
-              const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
-              return (
-                currentSpawns < maxAllowedSpawns &&
-                (lineageAutoIdVault.get(mId) || 0) + 1e-9 >= rank1EntryPrice
-              );
-            });
-            if (sourceMain === undefined && activeRank === 1) {
-              sourceMain = priorMains.find((mId) => {
-                if (usedExtraR2To4ForMain.has(mId)) return false;
-                const r1Bal = lineageAutoIdVault.get(mId) || 0;
-                const extraBal = extraVaultFromRanks2To4.get(mId) || 0;
-                const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
-                const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
-                return (
-                  currentSpawns < maxAllowedSpawns &&
-                  r1Bal + extraBal + 1e-9 >= rank1EntryPrice
-                );
-              });
-              if (sourceMain !== undefined) {
-                usedExtraR2To4ForMain.add(sourceMain);
-                const r1Bal = lineageAutoIdVault.get(sourceMain) || 0;
-                const extraBal = extraVaultFromRanks2To4.get(sourceMain) || 0;
-                lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
-              } else if (
-                explicitSponsorId > 0 &&
-                (ownerAllMainNodesMap.get(ownerKey) || []).includes(explicitSponsorId) &&
-                explicitSponsorId < n.id
-              ) {
-                sourceMain = explicitSponsorId;
-              } else if (priorMains.length > 0) {
-                sourceMain = priorMains[0];
-              }
-            }
+            return (
+              (isSelfSponsored && (explicitSponsorId === 0 || mId === explicitSponsorId)) ||
+              (explicitSponsorId > 0 && explicitSponsorId === mSponsorId)
+            );
+          });
 
+          let sourceMain = priorMains.find(
+            (mId) => (lineageAutoIdVault.get(mId) || 0) + 1e-9 >= rank1EntryPrice
+          );
+          if (sourceMain === undefined && activeRank === 1) {
+            sourceMain = priorMains.find((mId) => {
+              if (usedExtraR2To4ForMain.has(mId)) return false;
+              const r1Bal = lineageAutoIdVault.get(mId) || 0;
+              const extraBal = extraVaultFromRanks2To4.get(mId) || 0;
+              return r1Bal + extraBal + 1e-9 >= rank1EntryPrice;
+            });
             if (sourceMain !== undefined) {
-              autoMainNodeIds.add(n.id);
-              autoIdSourceMainMap.set(n.id, sourceMain);
-              mainNodeAutoIdSpawnCount.set(
-                sourceMain,
-                (mainNodeAutoIdSpawnCount.get(sourceMain) || 0) + 1
-              );
-              const currentAutoVault = lineageAutoIdVault.get(sourceMain) || 0;
-              lineageAutoIdVault.set(
-                sourceMain,
-                Math.max(0, Number((currentAutoVault - rank1EntryPrice).toFixed(4)))
-              );
+              usedExtraR2To4ForMain.add(sourceMain);
+              const r1Bal = lineageAutoIdVault.get(sourceMain) || 0;
+              const extraBal = extraVaultFromRanks2To4.get(sourceMain) || 0;
+              lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
             }
+          }
+
+          if (sourceMain !== undefined) {
+            autoMainNodeIds.add(n.id);
+            autoIdSourceMainMap.set(n.id, sourceMain);
+            mainNodeAutoIdSpawnCount.set(
+              sourceMain,
+              (mainNodeAutoIdSpawnCount.get(sourceMain) || 0) + 1
+            );
+            const currentAutoVault = lineageAutoIdVault.get(sourceMain) || 0;
+            lineageAutoIdVault.set(
+              sourceMain,
+              Math.max(0, Number((currentAutoVault - rank1EntryPrice).toFixed(4)))
+            );
           }
         }
 
@@ -2482,56 +2570,48 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const firstMain = s1OwnerPrimary.get(oKey) || id1;
 
           if (!sn.isClone && !sn.isExtraId && id1 > firstMain) {
-            if (sn.directSponsor && sn.directSponsor.toLowerCase() === oKey) {
-              const explicitSpId = sn.directSponsorNodeId || 0;
-              // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
-              const priorMains = (s1OwnerAllMains.get(oKey) || []).filter(
-                (m) =>
-                  m < id1 &&
-                  (explicitSpId === 0 || m === explicitSpId) &&
-                  getMainIdWindow5Start(m, sn.owner) > 1
+            const explicitSpId = sn.directSponsorNodeId || 0;
+            // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
+            const priorMains = (s1OwnerAllMains.get(oKey) || []).filter((m) => {
+              if (m >= id1) return false;
+              if (getMainIdWindow5Start(m, sn.owner) <= 1) return false;
+              const maxAllowed = crossRankAutoIdCount.get(m) || 0;
+              const curSpawns = s1AutoIdCountByMain.get(m) || 0;
+              if (curSpawns >= maxAllowed) return false;
+              const mSpId = snap1.get(m)?.directSponsorNodeId || 0;
+              const isSelfSp = Boolean(sn.directSponsor && sn.directSponsor.toLowerCase() === oKey);
+              return (
+                (isSelfSp && (explicitSpId === 0 || m === explicitSpId)) ||
+                (explicitSpId > 0 && explicitSpId === mSpId)
               );
-              let sourceMain = priorMains.find((m) => {
-                const maxAllowed = crossRankAutoIdCount.get(m) || 0;
-                const curSpawns = s1AutoIdCountByMain.get(m) || 0;
-                return (
-                  curSpawns < maxAllowed &&
-                  (s1AutoVaultSim.get(m) || 0) + 1e-9 >= r1Price
-                );
+            });
+            let sourceMain = priorMains.find(
+              (m) => (s1AutoVaultSim.get(m) || 0) + 1e-9 >= r1Price
+            );
+            if (sourceMain === undefined) {
+              sourceMain = priorMains.find((m) => {
+                if (s1UsedExtraR2To3.has(m)) return false;
+                const r1Bal = s1AutoVaultSim.get(m) || 0;
+                const extraBal = extraVaultFromRanks2To4.get(m) || 0;
+                return r1Bal + extraBal + 1e-9 >= r1Price;
               });
-              if (sourceMain === undefined) {
-                sourceMain = priorMains.find((m) => {
-                  if (s1UsedExtraR2To3.has(m)) return false;
-                  const r1Bal = s1AutoVaultSim.get(m) || 0;
-                  const extraBal = extraVaultFromRanks2To4.get(m) || 0;
-                  const maxAllowed = crossRankAutoIdCount.get(m) || 0;
-                  const curSpawns = s1AutoIdCountByMain.get(m) || 0;
-                  return curSpawns < maxAllowed && r1Bal + extraBal + 1e-9 >= r1Price;
-                });
-                if (sourceMain !== undefined) {
-                  s1UsedExtraR2To3.add(sourceMain);
-                  s1AutoVaultSim.set(
-                    sourceMain,
-                    Number(((s1AutoVaultSim.get(sourceMain) || 0) + (extraVaultFromRanks2To4.get(sourceMain) || 0)).toFixed(4))
-                  );
-                } else if (
-                  explicitSpId > 0 &&
-                  (s1OwnerAllMains.get(oKey) || []).includes(explicitSpId) &&
-                  explicitSpId < id1
-                ) {
-                  sourceMain = explicitSpId;
-                } else if (priorMains.length > 0) {
-                  sourceMain = priorMains[0];
-                }
-              }
               if (sourceMain !== undefined) {
-                s1AutoIdSourceMap.set(id1, sourceMain);
-                s1AutoIdCountByMain.set(sourceMain, (s1AutoIdCountByMain.get(sourceMain) || 0) + 1);
+                s1UsedExtraR2To3.add(sourceMain);
                 s1AutoVaultSim.set(
                   sourceMain,
-                  Math.max(0, Number(((s1AutoVaultSim.get(sourceMain) || 0) - r1Price).toFixed(4)))
+                  Number(
+                    ((s1AutoVaultSim.get(sourceMain) || 0) + (extraVaultFromRanks2To4.get(sourceMain) || 0)).toFixed(4)
+                  )
                 );
               }
+            }
+            if (sourceMain !== undefined) {
+              s1AutoIdSourceMap.set(id1, sourceMain);
+              s1AutoIdCountByMain.set(sourceMain, (s1AutoIdCountByMain.get(sourceMain) || 0) + 1);
+              s1AutoVaultSim.set(
+                sourceMain,
+                Math.max(0, Number(((s1AutoVaultSim.get(sourceMain) || 0) - r1Price).toFixed(4)))
+              );
             }
           }
 

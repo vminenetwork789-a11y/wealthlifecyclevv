@@ -33,7 +33,7 @@ const PORT = 3000;
 const CONFIG_FILE_PATH = path.resolve(__dirname, 'prisma/contract-config.json');
 
 const DEFAULT_SYSTEM_CONFIG = {
-  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || '0x675CDB85d9A843ac3e87b42beb7A606da79882E8',
+  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || '0x87e9f1b9a63eB65C91fcA718C5Af1cEE4eEC6209',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: 97,
   networkName: 'BNB Smart Chain Testnet',
@@ -43,6 +43,7 @@ const DEFAULT_SYSTEM_CONFIG = {
 };
 
 const SERVER_LEGACY_CONTRACTS = new Set([
+  '0x675cdb85d9a843ac3e87b42beb7A606da79882e8',
   '0xae3736ecd23dfb6c49b76ef8548391c1b6fff7b9',
   '0x1700326ce4d4507a5dd88eb50156758581b6f4cb',
   '0x5f0a48aa94dcfa820a12cb8e6c46e9cce807d341',
@@ -955,6 +956,35 @@ async function registerUserAccount(owner: string, sponsor?: string, sponsorMainN
   return newUser;
 }
 
+function findShallowestLeftToRightSlotInRankNodes(
+  rNodes: IndexedTreeNode[],
+  startNodeId: number = 1
+): { parentId: number; isLeft: boolean } {
+  const byId = new Map<number, IndexedTreeNode>();
+  for (const n of rNodes) byId.set(n.id, n);
+
+  const rootId = byId.has(startNodeId) ? startNodeId : 1;
+  const queue: number[] = [rootId];
+  const visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const curId = queue.shift()!;
+    if (visited.has(curId)) continue;
+    visited.add(curId);
+    const cur = byId.get(curId);
+    if (!cur) continue;
+    if (!cur.leftChild || cur.leftChild <= 0 || !byId.has(cur.leftChild)) {
+      return { parentId: cur.id, isLeft: true };
+    }
+    if (!cur.rightChild || cur.rightChild <= 0 || !byId.has(cur.rightChild)) {
+      return { parentId: cur.id, isLeft: false };
+    }
+    queue.push(cur.leftChild, cur.rightChild);
+  }
+
+  return { parentId: rootId, isLeft: true };
+}
+
 function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
   if (!Array.isArray(nodes) || nodes.length === 0) return [];
   nodes.sort((a, b) => a.id - b.id);
@@ -983,6 +1013,111 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
       parent.rightChild = n.id;
     }
   }
+
+  // สำหรับ Rank 2-27: ตรวจสอบว่าผู้แนะนำตรง (Direct Sponsor ID เช่น ID #5) มีโหนดอยู่ใน Rank นั้นหรือยัง
+  // หากผู้แนะนำยังไม่ได้อัปเกรดขึ้นมาถึง Rank นั้น ให้หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา (BFS จาก Root #1)
+  const rankNum = nodes[0]?.rank || 1;
+  if (rankNum > 1 && nodes.length > 1) {
+    const r1Nodes = matrixDB?.nodesByRank?.[1] || [];
+    for (const n of nodes) {
+      if (n.id <= 1 || n.isClone || n.isExtraId) continue;
+
+      let spMainId = n.directSponsorNodeId || 0;
+      if (spMainId <= 0 && n.originMainId > 1 && r1Nodes.length > 0) {
+        const origR1 = r1Nodes.find((x) => x.id === n.originMainId && !x.isClone && !x.isExtraId);
+        if (origR1 && origR1.directSponsorNodeId > 0) {
+          spMainId = origR1.directSponsorNodeId;
+        }
+      }
+      if (spMainId <= 1) continue;
+
+      const sponsorNodeInRankBefore = nodes.find(
+        (prev) =>
+          prev.id < n.id &&
+          !prev.isClone &&
+          !prev.isExtraId &&
+          (spMainId === 1 ? prev.id === 1 : prev.originMainId === spMainId)
+      );
+
+      if (!sponsorNodeInRankBefore) {
+        // ผู้แนะนำตรงยังไม่มีโหนดใน Rank นี้ ณ เวลาที่โหนดนี้ถูกสร้าง -> หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา
+        const queue: number[] = [1];
+        const visited = new Set<number>();
+        let shallowParentId = 1;
+        let shallowIsLeft = true;
+
+        while (queue.length > 0) {
+          const curId = queue.shift()!;
+          if (visited.has(curId)) continue;
+          visited.add(curId);
+          const cur = byId.get(curId);
+          if (!cur || cur.id >= n.id) continue;
+
+          const hasLeftBefore =
+            cur.leftChild > 0 &&
+            cur.leftChild < n.id &&
+            byId.has(cur.leftChild) &&
+            byId.get(cur.leftChild)!.parentId === cur.id;
+          if (!hasLeftBefore) {
+            shallowParentId = cur.id;
+            shallowIsLeft = true;
+            break;
+          }
+
+          const hasRightBefore =
+            cur.rightChild > 0 &&
+            cur.rightChild < n.id &&
+            byId.has(cur.rightChild) &&
+            byId.get(cur.rightChild)!.parentId === cur.id;
+          if (!hasRightBefore) {
+            shallowParentId = cur.id;
+            shallowIsLeft = false;
+            break;
+          }
+
+          queue.push(cur.leftChild, cur.rightChild);
+        }
+
+        const shallowParent = byId.get(shallowParentId);
+        if (shallowParent && n.parentId !== shallowParentId) {
+          const oldParent = byId.get(n.parentId);
+          if (oldParent) {
+            if (oldParent.leftChild === n.id) oldParent.leftChild = 0;
+            if (oldParent.rightChild === n.id) oldParent.rightChild = 0;
+          }
+          n.parentId = shallowParentId;
+          if (shallowIsLeft) {
+            shallowParent.leftChild = n.id;
+          } else {
+            shallowParent.rightChild = n.id;
+          }
+        }
+      }
+    }
+
+    // Reconcile nodeVault in Rank 2..27 so any parent whose leftChild was moved doesn't retain phantom vault
+    const rUnitVault = Number(((RANK_PRICES_USDT[rankNum - 1] || 10) * 0.35).toFixed(4));
+    for (const m of nodes) {
+      if (m.isClone || m.isExtraId) continue;
+      let leftCount = 0;
+      const mOrig = m.originMainId || m.id;
+      for (const cand of nodes) {
+        const cOrig = cand.originMainId || cand.id;
+        if (
+          (cand.id === m.id || (cand.isClone && (cOrig === m.id || cOrig === mOrig))) &&
+          cand.leftChild > 0 &&
+          byId.has(cand.leftChild)
+        ) {
+          leftCount++;
+        }
+      }
+      const maxPossibleVault = Number((leftCount * rUnitVault).toFixed(4));
+      if ((m.nodeVault || 0) > maxPossibleVault) m.nodeVault = maxPossibleVault;
+      if ((m.rawNodeVault || 0) > maxPossibleVault) m.rawNodeVault = maxPossibleVault;
+      if ((m.reconciledBaseVault || 0) > maxPossibleVault) m.reconciledBaseVault = maxPossibleVault;
+    }
+  }
+
   return nodes;
 }
 
@@ -994,8 +1129,11 @@ function findExtraIdPlacementInRankNodes(
   const byId = new Map<number, IndexedTreeNode>();
   for (const n of rNodes) byId.set(n.id, n);
 
-  const mainNode = byId.get(sponsorMainId) || byId.get(1);
-  if (!mainNode) return { parentId: 1, isLeft: true };
+  if (!sponsorMainId || sponsorMainId <= 0 || !byId.has(sponsorMainId)) {
+    return findShallowestLeftToRightSlotInRankNodes(rNodes, 1);
+  }
+
+  const mainNode = byId.get(sponsorMainId)!;
 
   // Priority 1: Directly under sponsorMainId (Left then Right)
   if (!mainNode.leftChild || mainNode.leftChild <= 0 || !byId.has(mainNode.leftChild)) {
@@ -1005,11 +1143,13 @@ function findExtraIdPlacementInRankNodes(
     return { parentId: mainNode.id, isLeft: false };
   }
 
-  // Priority 2: Clones belonging to sponsorMainId (originMainId === sponsorMainId)
+  // Priority 2: Clones belonging to sponsorMainId (originMainId === sponsorMainId or mainNode.originMainId)
+  const mainOriginTag = mainNode.originMainId || mainNode.id;
   const sorted = [...rNodes].sort((a, b) => a.id - b.id);
   for (const cand of sorted) {
     if (!cand.isClone) continue;
-    if ((cand.originMainId || cand.id) === mainNode.id) {
+    const candOrig = cand.originMainId || cand.id;
+    if (candOrig === mainNode.id || candOrig === mainOriginTag) {
       if (!cand.leftChild || cand.leftChild <= 0 || !byId.has(cand.leftChild)) {
         return { parentId: cand.id, isLeft: true };
       }
@@ -1020,24 +1160,7 @@ function findExtraIdPlacementInRankNodes(
   }
 
   // Priority 3: BFS under sponsorMainId
-  const queue: number[] = [mainNode.id];
-  const visited = new Set<number>();
-  while (queue.length > 0) {
-    const curId = queue.shift()!;
-    if (visited.has(curId)) continue;
-    visited.add(curId);
-    const cur = byId.get(curId);
-    if (!cur) continue;
-    if (!cur.leftChild || cur.leftChild <= 0 || !byId.has(cur.leftChild)) {
-      return { parentId: cur.id, isLeft: true };
-    }
-    if (!cur.rightChild || cur.rightChild <= 0 || !byId.has(cur.rightChild)) {
-      return { parentId: cur.id, isLeft: false };
-    }
-    queue.push(cur.leftChild, cur.rightChild);
-  }
-
-  return { parentId: mainNode.id, isLeft: true };
+  return findShallowestLeftToRightSlotInRankNodes(rNodes, mainNode.id);
 }
 
 function findClonePlacementInRankNodes(
@@ -1066,68 +1189,66 @@ function findClonePlacementInRankNodes(
   const roundIndex = existingClonesCount % 2;
   const cloneRound = roundIndex + 1;
 
-  const originNode = byId.get(cloneOriginMainId) || triggerParent;
-  let targetSponsorNodeId = 1;
-  if (cloneOriginMainId === 1) {
-    targetSponsorNodeId = 1;
-  } else if (originNode.directSponsorNodeId && originNode.directSponsorNodeId > 0) {
-    targetSponsorNodeId = originNode.directSponsorNodeId;
+  const originNode =
+    rNodes.find(
+      (n) => !n.isClone && !n.isExtraId && (n.id === cloneOriginMainId || n.originMainId === cloneOriginMainId)
+    ) ||
+    byId.get(cloneOriginMainId) ||
+    triggerParent;
+  const rankNum = originNode.rank || triggerParent.rank || 1;
+
+  let sponsorNodeInRankId = 0;
+  let savedDirectSponsorId = originNode.directSponsorNodeId || 1;
+
+  if (cloneOriginMainId === 1 || originNode.id === 1) {
+    sponsorNodeInRankId = 1;
+    savedDirectSponsorId = 1;
+  } else if (rankNum === 1 || originNode.isExtraId) {
+    if (originNode.directSponsorNodeId && originNode.directSponsorNodeId > 0) {
+      sponsorNodeInRankId = originNode.directSponsorNodeId;
+      savedDirectSponsorId = originNode.directSponsorNodeId;
+    } else {
+      const spKey = (originNode.directSponsor || '').toLowerCase();
+      const spMain = rNodes.find(
+        (n) => !n.isClone && !n.isExtraId && (n.owner || '').toLowerCase() === spKey
+      );
+      sponsorNodeInRankId = spMain ? spMain.id : 1;
+      savedDirectSponsorId = sponsorNodeInRankId;
+    }
   } else {
-    const spKey = (originNode.directSponsor || '').toLowerCase();
-    const spMain = rNodes.find(
-      (n) => !n.isClone && !n.isExtraId && (n.owner || '').toLowerCase() === spKey
+    // Rank 2..27: ตรวจสอบว่าผู้แนะนำตรง (savedDirectSponsorId เช่น ID #5) มีโหนดใน Rank นี้หรือยัง
+    const r1SponsorId = originNode.directSponsorNodeId || 1;
+    savedDirectSponsorId = r1SponsorId;
+    const spNodeInR = rNodes.find(
+      (n) =>
+        !n.isClone &&
+        !n.isExtraId &&
+        (r1SponsorId === 1 ? n.id === 1 : n.originMainId === r1SponsorId)
     );
-    targetSponsorNodeId = spMain ? spMain.id : 1;
+    sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
   }
 
-  if (roundIndex === 0) {
-    // รอบที่ 1: ติดตัวผู้แนะนำของรหัสหลักนั้น (targetSponsorNodeId) และโคลนของผู้แนะนำนั้น
-    const slot = findExtraIdPlacementInRankNodes(rNodes, targetSponsorNodeId);
+  if (roundIndex === 0 && sponsorNodeInRankId > 0 && byId.has(sponsorNodeInRankId)) {
+    // รอบที่ 1: ติดตัวผู้แนะนำของรหัสหลักนั้น (เมื่อผู้แนะนำมีโหนดใน Rank นี้แล้ว)
+    const slot = findExtraIdPlacementInRankNodes(rNodes, sponsorNodeInRankId);
     return {
       parentId: slot.parentId,
       isLeft: slot.isLeft,
       cloneRound,
       cloneOriginMainId,
-      targetSponsorNodeId,
+      targetSponsorNodeId: savedDirectSponsorId,
     };
   }
 
-  // รอบที่ 2: วางแบบกว้างนำยาว (Global BFS เริ่มจาก Root #1)
-  const queue: number[] = [1];
-  const visited = new Set<number>();
-  while (queue.length > 0) {
-    const curId = queue.shift()!;
-    if (visited.has(curId)) continue;
-    visited.add(curId);
-    const cur = byId.get(curId);
-    if (!cur) continue;
-    if (!cur.leftChild || cur.leftChild <= 0 || !byId.has(cur.leftChild)) {
-      return {
-        parentId: cur.id,
-        isLeft: true,
-        cloneRound,
-        cloneOriginMainId,
-        targetSponsorNodeId,
-      };
-    }
-    if (!cur.rightChild || cur.rightChild <= 0 || !byId.has(cur.rightChild)) {
-      return {
-        parentId: cur.id,
-        isLeft: false,
-        cloneRound,
-        cloneOriginMainId,
-        targetSponsorNodeId,
-      };
-    }
-    queue.push(cur.leftChild, cur.rightChild);
-  }
-
+  // รอบที่ 2 หรือกรณีผู้แนะนำยังไม่ได้อัปเกรดขึ้นมาถึง Rank นี้ (sponsorNodeInRankId === 0):
+  // ให้หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา (BFS เริ่มจาก Root #1)
+  const bfsSlot = findShallowestLeftToRightSlotInRankNodes(rNodes, 1);
   return {
-    parentId: 1,
-    isLeft: true,
+    parentId: bfsSlot.parentId,
+    isLeft: bfsSlot.isLeft,
     cloneRound,
     cloneOriginMainId,
-    targetSponsorNodeId,
+    targetSponsorNodeId: savedDirectSponsorId,
   };
 }
 
@@ -1274,7 +1395,16 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
           matrixDB.nodesByRank[targetRank] = [];
         }
         const targetRankNodes = matrixDB.nodesByRank[targetRank];
-        const placement = findExtraIdPlacementInRankNodes(targetRankNodes, targetMainInRank.id);
+        const r1SponsorId = r1Main.directSponsorNodeId > 0 ? r1Main.directSponsorNodeId : 1;
+        const sponsorNodeInTarget = targetRankNodes.find(
+          (n) =>
+            !n.isClone &&
+            !n.isExtraId &&
+            (r1SponsorId === 1 ? n.id === 1 : n.originMainId === r1SponsorId)
+        );
+        const placement = sponsorNodeInTarget
+          ? findExtraIdPlacementInRankNodes(targetRankNodes, sponsorNodeInTarget.id)
+          : findShallowestLeftToRightSlotInRankNodes(targetRankNodes, 1);
         const maxId = targetRankNodes.reduce((m, n) => Math.max(m, n.id), 0);
         const newExtraId = maxId + 1;
 
@@ -1282,7 +1412,7 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
           id: newExtraId,
           rank: targetRank,
           owner: r1Main.owner,
-          directSponsor: r1Main.owner,
+          directSponsor: r1Main.directSponsor || r1Main.owner,
           parentId: placement.parentId,
           leftChild: 0,
           rightChild: 0,
@@ -1291,7 +1421,7 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
           isSyntheticExtra: true,
           originMainId: newExtraId,
           cloneRound: 0,
-          directSponsorNodeId: targetMainInRank.id,
+          directSponsorNodeId: r1SponsorId,
           nodeVault: 0,
           rawNodeVault: 0,
         };
@@ -3454,16 +3584,16 @@ async function startApp() {
         }
 
         // Find Direct Sponsor's Main Node in rank `r`
-        const spNodeInR =
-          rList.find(
-            (n) =>
-              !n.isClone &&
-              !n.isExtraId &&
-              (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
-          ) || rList[0];
-        const sponsorNodeIdInR = spNodeInR ? spNodeInR.id : 1;
-
-        const placement = findExtraIdPlacementInRankNodes(rList, sponsorNodeIdInR);
+        // หากผู้แนะนำตรงยังไม่ได้อัปเกรดขึ้นมาถึง Rank r ให้หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา (BFS จาก Root #1)
+        const spNodeInR = rList.find(
+          (n) =>
+            !n.isClone &&
+            !n.isExtraId &&
+            (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
+        );
+        const placement = spNodeInR
+          ? findExtraIdPlacementInRankNodes(rList, spNodeInR.id)
+          : findShallowestLeftToRightSlotInRankNodes(rList, 1);
         const parentIdNum = Number(placement.parentId) || 1;
         const maxId = rList.reduce((m, n) => Math.max(m, n.id), 0);
         const nextIdInRank = maxId + 1;
@@ -3696,16 +3826,17 @@ async function startApp() {
           (n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum
         );
         if (!existingNode) {
-          const spNodeInR =
-            rList.find(
-              (n) =>
-                !n.isClone &&
-                !n.isExtraId &&
-                (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
-            ) || rList[0];
-          const sponsorNodeIdInR = spNodeInR ? spNodeInR.id : 1;
-
-          const placement = findExtraIdPlacementInRankNodes(rList, sponsorNodeIdInR);
+          // ตรวจสอบว่าผู้แนะนำตรง (r1SponsorMainId) มีโหนดใน Rank r หรือยัง
+          // หากยังไม่ได้อัปเกรดขึ้นมาถึง Rank นั้น ให้หาตำแหน่งว่างชั้นตื้นลงมาจากซ้ายไปขวา (BFS จาก Root #1)
+          const spNodeInR = rList.find(
+            (n) =>
+              !n.isClone &&
+              !n.isExtraId &&
+              (r1SponsorMainId === 1 ? n.id === 1 : n.originMainId === r1SponsorMainId)
+          );
+          const placement = spNodeInR
+            ? findExtraIdPlacementInRankNodes(rList, spNodeInR.id)
+            : findShallowestLeftToRightSlotInRankNodes(rList, 1);
           const parentIdNum = Number(placement.parentId) || 1;
           const maxId = rList.reduce((m, n) => Math.max(m, n.id), 0);
           const nextIdInRank = maxId + 1;
