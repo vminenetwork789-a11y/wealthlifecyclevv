@@ -680,6 +680,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     'all' | 'direct30' | 'level30' | 'vault35' | 'auto_extra'
   >('all');
   const [perIdReportsMap, setPerIdReportsMap] = useState<Map<number, any>>(new Map());
+  const [systemPoolsData, setSystemPoolsData] = useState<any>(null);
+  const [isSystemPoolsModalOpen, setIsSystemPoolsModalOpen] = useState<boolean>(false);
+  const [systemPoolsModalTab, setSystemPoolsModalTab] = useState<'all' | 'allsell' | 'family'>('all');
   const [modalUpgradeTargetRank, setModalUpgradeTargetRank] = useState<number>(2);
   const [isModalUpgrading, setIsModalUpgrading] = useState<boolean>(false);
   const [modalUpgradeMessage, setModalUpgradeMessage] = useState<string | null>(null);
@@ -692,12 +695,17 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       const res = await fetch('/api/matrix/per-id-history');
       if (res.ok) {
         const data = await res.json();
-        if (data?.success && Array.isArray(data.reports)) {
-          const map = new Map<number, any>();
-          for (const rep of data.reports) {
-            map.set(Number(rep.id), rep);
+        if (data?.success) {
+          if (Array.isArray(data.reports)) {
+            const map = new Map<number, any>();
+            for (const rep of data.reports) {
+              map.set(Number(rep.id), rep);
+            }
+            setPerIdReportsMap(map);
           }
-          setPerIdReportsMap(map);
+          if (data.systemPools) {
+            setSystemPoolsData(data.systemPools);
+          }
         }
       }
     } catch {
@@ -3362,6 +3370,102 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     return { latestNodeInRank: latestNode, maxTreeLevelInRank: maxLvl };
   }, [activeNodesMap]);
 
+  // Compute AllSell (4%) & Family Pool for the active rank view (works for both On-Chain and Demo Clone Tree)
+  const activeRankPoolsSummary = useMemo(() => {
+    const unitPrice = RANK_PRICES_USDT[selectedRank - 1] || 5;
+    const allSellUnit = Number((unitPrice * 0.04).toFixed(4));
+    const directUnit = Number((unitPrice * 0.3).toFixed(4));
+    const levelUnit = Number((unitPrice * 0.02).toFixed(4));
+
+    let rankAllSell = 0;
+    let rankFamilyUnpaidLevel = 0;
+    let rankFamilyRootCloneDirect = 0;
+    const rankAllSellHistory: any[] = [];
+    const rankFamilyHistory: any[] = [];
+
+    const sortedNodes = Array.from(activeNodesMap.values()).sort((a, b) => a.id - b.id);
+    for (const child of sortedNodes) {
+      if (child.id <= 1 || !child.isLeft) continue;
+      const parent = activeNodesMap.get(child.parentId);
+      if (!parent || parent.leftChild !== child.id) continue;
+
+      const mainLabel = child.r1MainId || child.originMainId || child.id;
+      const childLabel = child.isExtraId
+        ? `Extra R${selectedRank}-#${child.id}`
+        : child.isClone
+        ? `โคลน R${selectedRank}-#${child.id} (ของ Main #${mainLabel})`
+        : child.isAutoMainId
+        ? `Auto ID #${mainLabel} (R${selectedRank}-#${child.id})`
+        : `Main #${mainLabel} (R${selectedRank}-#${child.id})`;
+
+      rankAllSell = Number((rankAllSell + allSellUnit).toFixed(4));
+      rankAllSellHistory.push({
+        rank: selectedRank,
+        fromNodeId: child.id,
+        fromMainId: mainLabel,
+        fromNodeType: childLabel,
+        parentId: parent.id,
+        amountUsdt: Number(allSellUnit.toFixed(2)),
+        note: `4% AllSell จาก ${childLabel} (วางซ้ายใต้ R${selectedRank}-#${parent.id})`,
+      });
+
+      if (parent.isExtraLineage) continue;
+
+      const isId1Clone = child.isClone && (mainLabel === 1 || parent.id === 1);
+      if (isId1Clone) {
+        rankFamilyRootCloneDirect = Number((rankFamilyRootCloneDirect + directUnit).toFixed(4));
+        rankFamilyHistory.push({
+          rank: selectedRank,
+          fromNodeId: child.id,
+          fromMainId: mainLabel,
+          fromNodeType: childLabel,
+          parentId: parent.id,
+          subType: 'ROOT_CLONE_DIRECT',
+          amountUsdt: Number(directUnit.toFixed(2)),
+          note: `30% ค่าแนะนำจากโคลนรหัส #1 (${childLabel} วางซ้ายใต้ R${selectedRank}-#${parent.id}) เข้า Family Pool`,
+        });
+      }
+
+      let currUp = child.parentId;
+      let paidTiers = 0;
+      const guard = new Set<number>();
+      for (let t = 1; t <= 15; t++) {
+        if (currUp <= 0 || guard.has(currUp)) break;
+        guard.add(currUp);
+        const upNode = activeNodesMap.get(currUp);
+        if (!upNode) break;
+        paidTiers++;
+        currUp = upNode.parentId;
+      }
+      const unpaidTiers = Math.max(0, 15 - paidTiers);
+      if (unpaidTiers > 0) {
+        const unpaidAmt = Number((unpaidTiers * levelUnit).toFixed(4));
+        rankFamilyUnpaidLevel = Number((rankFamilyUnpaidLevel + unpaidAmt).toFixed(4));
+        rankFamilyHistory.push({
+          rank: selectedRank,
+          fromNodeId: child.id,
+          fromMainId: mainLabel,
+          fromNodeType: childLabel,
+          parentId: parent.id,
+          subType: 'UNPAID_LEVEL',
+          paidTiers,
+          unpaidTiers,
+          amountUsdt: Number(unpaidAmt.toFixed(2)),
+          note: `ค่าชั้นส่วนที่เหลือ ${unpaidTiers} ชั้น (${unpaidTiers * 2}%) จาก ${childLabel} (จ่ายอัพไลน์ ${paidTiers}/15 ชั้น) เข้า Family Pool`,
+        });
+      }
+    }
+
+    return {
+      rankAllSellUsdt: Number(rankAllSell.toFixed(2)),
+      rankFamilyTotalUsdt: Number((rankFamilyUnpaidLevel + rankFamilyRootCloneDirect).toFixed(2)),
+      rankFamilyUnpaidLevelUsdt: Number(rankFamilyUnpaidLevel.toFixed(2)),
+      rankFamilyRootCloneDirectUsdt: Number(rankFamilyRootCloneDirect.toFixed(2)),
+      rankAllSellHistory,
+      rankFamilyHistory,
+    };
+  }, [activeNodesMap, selectedRank]);
+
   // If autoFollowNewNodes is enabled and a new node arrives that is NOT inside the currently focused subtree, ensure focusRootId shows it
   useEffect(() => {
     if (!autoFollowNewNodes || !latestNewNodeAlert || viewMode !== 'onchain') return;
@@ -3638,17 +3742,44 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       return `#${mainLabel}(#${child.id})`;
     };
 
-    const borderStyle = isNewlyAppended
-      ? 'border-amber-400 shadow-[0_4px_16px_rgba(2,6,23,0.85)]'
-      : isLatestInRank
-      ? 'border-emerald-400/90 shadow-[0_0_22px_rgba(52,211,153,0.75),0_0_10px_rgba(16,185,129,0.85)] ring-2 ring-emerald-400/60'
-      : node.isClone
-      ? 'border-emerald-400/90 shadow-[0_0_16px_rgba(16,185,129,0.25)]'
+    const isNewOrLatest = isNewlyAppended || isLatestInRank;
+
+    // สีกรอบสถานะใหม่หรือล่าสุด และสีกรอบตามประเภท ID:
+    // - โคลนนิ่ง (isClone) -> กรอบสีเขียว
+    // - Extra ID (isExtraId) -> กรอบสีแดง
+    // - Auto ID (isAutoMainId) -> กรอบสีทอง
+    // - Main ID (รหัสหลักปกติ) -> กรอบสีขาว
+    const borderStyle = node.isClone
+      ? isNewOrLatest
+        ? 'border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.9),0_0_12px_rgba(52,211,153,0.95)] ring-2 ring-emerald-400/85'
+        : 'border-emerald-400/95 shadow-[0_0_16px_rgba(16,185,129,0.35)] ring-1 ring-emerald-400/40'
       : node.isExtraId
-      ? 'border-rose-500/80 shadow-[0_0_14px_rgba(244,63,94,0.2)]'
+      ? isNewOrLatest
+        ? 'border-red-500 shadow-[0_0_24px_rgba(239,68,68,0.9),0_0_12px_rgba(248,113,113,0.95)] ring-2 ring-red-500/85'
+        : 'border-red-500/95 shadow-[0_0_16px_rgba(239,68,68,0.4)] ring-1 ring-red-500/45'
       : node.isAutoMainId
-      ? 'border-amber-400/90 shadow-[0_0_16px_rgba(245,158,11,0.3)] ring-1 ring-amber-400/40'
-      : 'border-slate-600/80 shadow-[0_4px_16px_rgba(2,6,23,0.85)]';
+      ? isNewOrLatest
+        ? 'border-amber-400 shadow-[0_0_24px_rgba(245,158,11,0.9),0_0_12px_rgba(251,191,36,0.95)] ring-2 ring-amber-400/85'
+        : 'border-amber-400/95 shadow-[0_0_16px_rgba(245,158,11,0.4)] ring-1 ring-amber-400/45'
+      : isNewOrLatest
+      ? 'border-white shadow-[0_0_24px_rgba(255,255,255,0.95),0_0_12px_rgba(248,250,252,0.95)] ring-2 ring-white/85'
+      : 'border-white/95 shadow-[0_0_15px_rgba(255,255,255,0.3)] ring-1 ring-white/40';
+
+    const latestPillStyle = node.isClone
+      ? 'bg-gradient-to-r from-emerald-400 to-teal-300 text-slate-950 border-emerald-100 shadow-[0_0_12px_rgba(16,185,129,0.95)]'
+      : node.isExtraId
+      ? 'bg-gradient-to-r from-red-500 to-rose-500 text-white border-red-200 shadow-[0_0_12px_rgba(239,68,68,0.95)]'
+      : node.isAutoMainId
+      ? 'bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950 border-amber-100 shadow-[0_0_12px_rgba(245,158,11,0.95)]'
+      : 'bg-white text-slate-950 border-white shadow-[0_0_12px_rgba(255,255,255,0.95)]';
+
+    const latestDotIcon = node.isClone
+      ? '🟢'
+      : node.isExtraId
+      ? '🔴'
+      : node.isAutoMainId
+      ? '🟡'
+      : '⚪';
 
     return (
       <div
@@ -3658,27 +3789,31 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         {/* Main Node Card (Reduced width & 30% reduced vertical length) */}
         <div
           data-node-card={node.id}
-          className={`relative w-[156px] sm:w-[172px] md:w-[180px] h-auto rounded-xl bg-[#131829] border-2 ${borderStyle} p-1.5 sm:p-2 text-left transition-all duration-200 hover:border-indigo-400/80 select-none`}
+          className={`relative w-[156px] sm:w-[172px] md:w-[180px] h-auto rounded-xl bg-[#131829] border-2 ${borderStyle} p-1.5 sm:p-2 text-left transition-all duration-200 select-none`}
         >
-          {/* Top-Left Floating Badges: ✨ มาใหม่ & 🟢 ล่าสุด */}
+          {/* Top-Left Floating Badges: ✨ มาใหม่ & ล่าสุด (สีตามประเภท ID) */}
           <div className="absolute -top-2.5 left-1.5 flex items-center gap-1 z-20">
             {isNewlyAppended && (
-              <div className="px-1.5 py-0.2 rounded-full bg-amber-400 text-slate-950 font-bold text-[8.5px] border border-amber-300 flex items-center gap-0.5 shrink-0">
-                <Sparkles className="w-2.5 h-2.5 text-slate-950" />
+              <div
+                className={`px-1.5 py-0.2 rounded-full font-bold text-[8.5px] border flex items-center gap-0.5 shrink-0 ${latestPillStyle}`}
+              >
+                <Sparkles className="w-2.5 h-2.5 shrink-0" />
                 <span>✨ มาใหม่</span>
               </div>
             )}
 
             {isLatestInRank && (
-              <div className="px-1.5 py-0.2 rounded-full bg-gradient-to-r from-emerald-400 to-teal-300 text-slate-950 font-black text-[8.5px] border border-emerald-100 shadow-[0_0_12px_rgba(16,185,129,0.9)] flex items-center gap-0.5 shrink-0">
-                <span>🟢 ล่าสุด</span>
+              <div
+                className={`px-1.5 py-0.2 rounded-full font-black text-[8.5px] border flex items-center gap-0.5 shrink-0 ${latestPillStyle}`}
+              >
+                <span>{latestDotIcon} ล่าสุด</span>
               </div>
             )}
           </div>
 
           {/* Top-Right Floating Pill Badge */}
           {node.isClone ? (
-            <div className="absolute -top-2 right-1.5 px-1.5 py-0.2 rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 text-[8.5px] font-black text-slate-950 shadow flex items-center gap-0.5 border border-emerald-200/50">
+            <div className="absolute -top-2 right-1.5 px-1.5 py-0.2 rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 text-[8.5px] font-black text-slate-950 shadow flex items-center gap-0.5 border border-emerald-200/70">
               <Dna className="w-2.5 h-2.5 text-slate-950" />
               <span>CLONE ID</span>
             </div>
@@ -3686,10 +3821,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             <div
               className={`absolute -top-2 right-1.5 px-1.5 py-0.2 rounded-full text-[8.5px] font-black shadow flex items-center gap-0.5 ${
                 node.isExtraId
-                  ? 'bg-gradient-to-r from-cyan-400 via-teal-400 to-blue-500 text-slate-950 border border-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+                  ? 'bg-gradient-to-r from-red-600 via-rose-500 to-red-500 text-white border border-red-200/80 shadow-[0_0_8px_rgba(239,68,68,0.5)]'
                   : node.isAutoMainId
-                  ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 text-slate-950 border border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.4)]'
-                  : 'bg-gradient-to-r from-indigo-500 via-purple-500 to-violet-500 text-white border border-purple-300/40'
+                  ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 text-slate-950 border border-amber-200 shadow-[0_0_8px_rgba(245,158,11,0.5)]'
+                  : 'bg-white text-slate-950 border border-white shadow-[0_0_8px_rgba(255,255,255,0.4)]'
               }`}
             >
               <span>
@@ -3697,7 +3832,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   ? 'EXTRA ID'
                   : node.isAutoMainId
                   ? 'AUTO ID'
-                  : 'MANUAL ID'}
+                  : 'MAIN ID'}
               </span>
             </div>
           )}
@@ -4219,13 +4354,135 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           </div>
         </div>
 
-        {/* แถบแจ้งเตือนการต่อสาย (Node Line Connection Notification Banner) */}
+        {/* Row 4b: สัญลักษณ์สีกรอบสถานะโหนด (Node Border Color Legend) */}
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap text-[11px] bg-slate-950/80 border border-slate-800/90 rounded-xl px-2.5 py-1.5">
+          <span className="text-slate-400 font-bold">สีกรอบสถานะ:</span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-950/70 border-2 border-emerald-400 text-emerald-300 font-extrabold">
+            <span>🟢 โคลนนิ่ง = กรอบสีเขียว</span>
+          </span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-900 border-2 border-white text-white font-extrabold">
+            <span>⚪ Main ID = กรอบสีขาว</span>
+          </span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-950/70 border-2 border-amber-400 text-amber-300 font-extrabold">
+            <span>🟡 Auto ID = กรอบสีทอง</span>
+          </span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-red-950/70 border-2 border-red-500 text-red-300 font-extrabold">
+            <span>🔴 Extra ID = กรอบสีแดง</span>
+          </span>
+        </div>
+
+        {/* Row 4c: ข้อมูลรายได้ AllSell (4%) และ Family Pool (คลิกเพื่อดูรายละเอียดและประวัติ) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+          {/* Card 1: รายได้ AllSell (4%) */}
+          <div
+            onClick={() => {
+              setSystemPoolsModalTab('allsell');
+              fetchPerIdHistoryForModal();
+              setIsSystemPoolsModalOpen(true);
+            }}
+            className="rounded-xl bg-gradient-to-r from-[#0e1b2e] via-[#111827] to-[#0f2429] border border-cyan-500/45 hover:border-cyan-400 p-2.5 sm:p-3 flex items-center justify-between gap-2 cursor-pointer transition shadow-md"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="px-2 py-0.5 rounded-md bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 font-extrabold text-[11px]">
+                  🌐 รายได้ AllSell (4%)
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  กระเป๋า: {(systemPoolsData?.allSellWallet || '0xBeFEB9871a20656aeF7E8d218f751e9C23FAF710').slice(0, 6)}...
+                  {(systemPoolsData?.allSellWallet || '0xBeFEB9871a20656aeF7E8d218f751e9C23FAF710').slice(-4)}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap font-mono text-xs">
+                <span>
+                  ผังนี้ (R{selectedRank}):{' '}
+                  <strong className="text-cyan-300 font-extrabold">
+                    +{activeRankPoolsSummary.rankAllSellUsdt.toFixed(2)} USDT
+                  </strong>
+                </span>
+                {viewMode === 'onchain' && (
+                  <span>
+                    รวมทุกแรงค์:{' '}
+                    <strong className="text-emerald-400 font-extrabold">
+                      +{Number(systemPoolsData?.allSellTotalUsdt ?? activeRankPoolsSummary.rankAllSellUsdt).toFixed(2)} USDT
+                    </strong>
+                  </span>
+                )}
+                {Number(systemPoolsData?.onChainBalances?.allSellWalletUsdt || 0) > 0 && (
+                  <span className="text-[11px] text-amber-300">
+                    (ยอดในกระเป๋าเชน: {Number(systemPoolsData.onChainBalances.allSellWalletUsdt).toFixed(2)} U)
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 font-bold text-[10.5px] shrink-0 cursor-pointer"
+            >
+              ดูประวัติ AllSell
+            </button>
+          </div>
+
+          {/* Card 2: รายได้ Family Pool */}
+          <div
+            onClick={() => {
+              setSystemPoolsModalTab('family');
+              fetchPerIdHistoryForModal();
+              setIsSystemPoolsModalOpen(true);
+            }}
+            className="rounded-xl bg-gradient-to-r from-[#1f1333] via-[#111827] to-[#29152c] border border-fuchsia-500/45 hover:border-fuchsia-400 p-2.5 sm:p-3 flex items-center justify-between gap-2 cursor-pointer transition shadow-md"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="px-2 py-0.5 rounded-md bg-fuchsia-500/20 border border-fuchsia-400/40 text-fuchsia-300 font-extrabold text-[11px]">
+                  🏛️ รายได้ Family Pool
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  กระเป๋า: {(systemPoolsData?.familyPoolWallet || '0x225DF4b5961f757f54728138F289Eaf49D4F275A').slice(0, 6)}...
+                  {(systemPoolsData?.familyPoolWallet || '0x225DF4b5961f757f54728138F289Eaf49D4F275A').slice(-4)}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap font-mono text-xs">
+                <span>
+                  ผังนี้ (R{selectedRank}):{' '}
+                  <strong className="text-fuchsia-300 font-extrabold">
+                    +{activeRankPoolsSummary.rankFamilyTotalUsdt.toFixed(2)} USDT
+                  </strong>
+                </span>
+                {viewMode === 'onchain' && (
+                  <span>
+                    รวมทุกแรงค์:{' '}
+                    <strong className="text-amber-300 font-extrabold">
+                      +{Number(systemPoolsData?.familyPoolTotalUsdt ?? activeRankPoolsSummary.rankFamilyTotalUsdt).toFixed(2)} USDT
+                    </strong>
+                  </span>
+                )}
+                {Number(systemPoolsData?.onChainBalances?.familyPoolWalletUsdt || 0) > 0 && (
+                  <span className="text-[11px] text-emerald-300">
+                    (ยอดในกระเป๋าเชน: {Number(systemPoolsData.onChainBalances.familyPoolWalletUsdt).toFixed(2)} U)
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/35 border border-fuchsia-400/50 text-fuchsia-200 font-bold text-[10.5px] shrink-0 cursor-pointer"
+            >
+              ดูประวัติ Family Pool
+            </button>
+          </div>
+        </div>
+
+        {/* แถบแจ้งเตือนการต่อสาย (Node Line Connection Notification Banner - สีกรอบตามประเภทโหนดล่าสุด) */}
         {latestNodeInRank && (
           <div
-            className={`rounded-2xl p-3 sm:p-3.5 border transition-all duration-300 relative overflow-hidden ${
-              latestNewNodeAlert || newlyAddedNodeIds.size > 0
-                ? 'bg-gradient-to-r from-amber-950/80 via-slate-900 to-emerald-950/80 border-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.35)] ring-1 ring-amber-400/50'
-                : 'bg-slate-900/95 border-emerald-500/40 shadow-lg'
+            className={`rounded-2xl p-3 sm:p-3.5 border-2 transition-all duration-300 relative overflow-hidden ${
+              latestNodeInRank.isClone
+                ? 'bg-gradient-to-r from-emerald-950/80 via-slate-900 to-emerald-950/80 border-emerald-400 shadow-[0_0_22px_rgba(16,185,129,0.4)]'
+                : latestNodeInRank.isExtraId
+                ? 'bg-gradient-to-r from-red-950/80 via-slate-900 to-rose-950/80 border-red-500 shadow-[0_0_22px_rgba(239,68,68,0.4)]'
+                : latestNodeInRank.isAutoMainId
+                ? 'bg-gradient-to-r from-amber-950/80 via-slate-900 to-yellow-950/80 border-amber-400 shadow-[0_0_22px_rgba(245,158,11,0.4)]'
+                : 'bg-gradient-to-r from-slate-900 via-slate-950 to-slate-900 border-white shadow-[0_0_22px_rgba(255,255,255,0.3)]'
             }`}
           >
             {/* Background ambient glow pulse */}
@@ -4245,13 +4502,31 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   <span className="flex items-center gap-1">
                     {latestNodeInRank.isClone ? (
                       <span className="inline-flex items-center gap-1 font-mono">
-                        <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-black text-[10px]">✨ มาใหม่</span>
-                        โคลน <strong className="text-amber-300 font-black">#{latestNodeInRank.id}</strong> (รหัสหลัก <strong className="text-amber-400">#{latestNodeInRank.r1MainId || latestNodeInRank.originMainId}</strong>)
+                        <span className="px-1.5 py-0.2 rounded bg-emerald-400 text-slate-950 font-black text-[10px]">
+                          🟢 โคลนนิ่งล่าสุด (กรอบเขียว)
+                        </span>
+                        โคลน <strong className="text-emerald-300 font-black">#{latestNodeInRank.id}</strong> (รหัสหลัก <strong className="text-amber-400">#{latestNodeInRank.r1MainId || latestNodeInRank.originMainId}</strong>)
+                      </span>
+                    ) : latestNodeInRank.isExtraId ? (
+                      <span className="inline-flex items-center gap-1 font-mono">
+                        <span className="px-1.5 py-0.2 rounded bg-red-500 text-white font-black text-[10px]">
+                          🔴 Extra ID ล่าสุด (กรอบแดง)
+                        </span>
+                        Extra <strong className="text-red-300 font-black">R{latestNodeInRank.rank}-#{latestNodeInRank.id}</strong>
+                      </span>
+                    ) : latestNodeInRank.isAutoMainId ? (
+                      <span className="inline-flex items-center gap-1 font-mono">
+                        <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-black text-[10px]">
+                          🟡 Auto ID ล่าสุด (กรอบทอง)
+                        </span>
+                        Auto ID <strong className="text-amber-300 font-black">#{latestNodeInRank.r1MainId || latestNodeInRank.originMainId}</strong> (โหนด <strong className="text-white font-extrabold">#{latestNodeInRank.id}</strong>)
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 font-mono">
-                        <span className="px-1.5 py-0.2 rounded bg-emerald-400 text-slate-950 font-black text-[10px]">🟢 ล่าสุด</span>
-                        รหัสหลัก <strong className="text-amber-300 font-black">#{latestNodeInRank.r1MainId || latestNodeInRank.originMainId}</strong> (โหนด <strong className="text-white font-extrabold">#{latestNodeInRank.id}</strong>)
+                        <span className="px-1.5 py-0.2 rounded bg-white text-slate-950 font-black text-[10px]">
+                          ⚪ Main ID ล่าสุด (กรอบขาว)
+                        </span>
+                        รหัสหลัก <strong className="text-white font-black">#{latestNodeInRank.r1MainId || latestNodeInRank.originMainId}</strong> (โหนด <strong className="text-white font-extrabold">#{latestNodeInRank.id}</strong>)
                       </span>
                     )}
                   </span>
@@ -6035,6 +6310,284 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   type="button"
                   onClick={() => setIsWalletIdsModalOpen(false)}
                   className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs cursor-pointer transition"
+                >
+                  ปิดหน้าต่าง
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ===================================================================== */}
+      {/* POPUP MODAL: รายได้ AllSell (4%) & Family Pool */}
+      {/* ===================================================================== */}
+      {isSystemPoolsModalOpen && (() => {
+        const allSellWallet =
+          systemPoolsData?.allSellWallet || '0xBeFEB9871a20656aeF7E8d218f751e9C23FAF710';
+        const familyPoolWallet =
+          systemPoolsData?.familyPoolWallet || '0x225DF4b5961f757f54728138F289Eaf49D4F275A';
+
+        const isOnChainMode = viewMode === 'onchain';
+        const totalAllSellUsdt = isOnChainMode
+          ? Number(systemPoolsData?.allSellTotalUsdt ?? activeRankPoolsSummary.rankAllSellUsdt)
+          : activeRankPoolsSummary.rankAllSellUsdt;
+        const totalFamilyUsdt = isOnChainMode
+          ? Number(systemPoolsData?.familyPoolTotalUsdt ?? activeRankPoolsSummary.rankFamilyTotalUsdt)
+          : activeRankPoolsSummary.rankFamilyTotalUsdt;
+        const familyUnpaidLevelUsdt = isOnChainMode
+          ? Number(
+              systemPoolsData?.familyPoolUnpaidLevelUsdt ??
+                activeRankPoolsSummary.rankFamilyUnpaidLevelUsdt
+            )
+          : activeRankPoolsSummary.rankFamilyUnpaidLevelUsdt;
+        const familyRootCloneDirectUsdt = isOnChainMode
+          ? Number(
+              systemPoolsData?.familyPoolRootCloneDirectUsdt ??
+                activeRankPoolsSummary.rankFamilyRootCloneDirectUsdt
+            )
+          : activeRankPoolsSummary.rankFamilyRootCloneDirectUsdt;
+
+        const allSellHistoryList: any[] =
+          isOnChainMode && Array.isArray(systemPoolsData?.allSellHistory) && systemPoolsData.allSellHistory.length > 0
+            ? systemPoolsData.allSellHistory
+            : activeRankPoolsSummary.rankAllSellHistory;
+
+        const familyHistoryList: any[] =
+          isOnChainMode && Array.isArray(systemPoolsData?.familyPoolHistory) && systemPoolsData.familyPoolHistory.length > 0
+            ? systemPoolsData.familyPoolHistory
+            : activeRankPoolsSummary.rankFamilyHistory;
+
+        const onChainAllSellBal = Number(systemPoolsData?.onChainBalances?.allSellWalletUsdt || 0);
+        const onChainFamilyBal = Number(systemPoolsData?.onChainBalances?.familyPoolWalletUsdt || 0);
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setIsSystemPoolsModalOpen(false)}
+          >
+            <div
+              className="w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-[#0b1022] border-2 border-cyan-500/50 rounded-2xl shadow-[0_25px_70px_rgba(0,0,0,0.9)] p-4 sm:p-6 space-y-4 text-xs"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/40 text-cyan-300">
+                      <Coins className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-base sm:text-lg font-extrabold text-white">
+                      📊 รายงานรายได้ AllSell (4%) และ Family Pool
+                    </h3>
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold text-[11px]">
+                      {isOnChainMode ? 'ข้อมูลจริงบนบล็อกเชน (On-Chain)' : `โหมดดูตัวอย่างผัง Rank ${selectedRank}`}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    ดึงข้อมูลการจ่ายรายได้ AllSell 4% และ Family Pool (ค่าชั้นส่วนที่เหลือจาก 15 ชั้น + ค่าแนะนำ 30% จากโคลนรหัส #1)
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsSystemPoolsModalOpen(false)}
+                  className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* 2 Summary Cards: AllSell vs Family Pool */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 font-mono">
+                {/* AllSell Box */}
+                <div className="rounded-xl bg-[#0b1c2c] border border-cyan-500/45 p-3.5 space-y-2">
+                  <div className="flex items-center justify-between border-b border-cyan-500/20 pb-1.5">
+                    <span className="font-bold text-cyan-300 text-sm">🌐 รายได้ AllSell (4% ทุกเม็ดซ้าย)</span>
+                    <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-200 text-[10px] font-bold">
+                      4% / เม็ดซ้าย
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">ยอดสะสมในผัง Rank {selectedRank}:</span>
+                      <span className="font-extrabold text-cyan-300">
+                        +{activeRankPoolsSummary.rankAllSellUsdt.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">ยอดสะสมรวมทุกแรงค์ (สัญญาปัจจุบัน):</span>
+                      <span className="font-extrabold text-emerald-400 text-sm">
+                        +{totalAllSellUsdt.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1.5 border-t border-cyan-500/20">
+                      <span className="text-slate-300">ยอดคงเหลือจริงในกระเป๋า AllSell บนเชน:</span>
+                      <span className="font-extrabold text-amber-300 text-sm">
+                        {onChainAllSellBal.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
+                      <span className="truncate">กระเป๋า: {allSellWallet}</span>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress(allSellWallet)}
+                        className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700 cursor-pointer shrink-0"
+                      >
+                        {copiedText === allSellWallet ? 'คัดลอกแล้ว' : 'คัดลอก'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Family Pool Box */}
+                <div className="rounded-xl bg-[#1d1130] border border-fuchsia-500/45 p-3.5 space-y-2">
+                  <div className="flex items-center justify-between border-b border-fuchsia-500/20 pb-1.5">
+                    <span className="font-bold text-fuchsia-300 text-sm">🏛️ รายได้ Family Pool</span>
+                    <span className="px-2 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 text-[10px] font-bold">
+                      Unpaid 15 ชั้น + 30% โคลน #1
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">1) ค่าชั้นส่วนที่เหลือจาก 15 ชั้น (2%/ชั้น):</span>
+                      <span className="font-extrabold text-fuchsia-300">
+                        +{familyUnpaidLevelUsdt.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">2) 30% ค่าแนะนำจากโคลนรหัส #1:</span>
+                      <span className="font-extrabold text-purple-300">
+                        +{familyRootCloneDirectUsdt.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300">รวมสะสมทุกแรงค์ (สัญญาปัจจุบัน):</span>
+                      <span className="font-extrabold text-amber-300 text-sm">
+                        +{totalFamilyUsdt.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1.5 border-t border-fuchsia-500/20">
+                      <span className="text-slate-300">ยอดคงเหลือจริงในกระเป๋า FamilyPool บนเชน:</span>
+                      <span className="font-extrabold text-emerald-400 text-sm">
+                        {onChainFamilyBal.toFixed(2)} USDT
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
+                      <span className="truncate">กระเป๋า: {familyPoolWallet}</span>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress(familyPoolWallet)}
+                        className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-fuchsia-300 border border-slate-700 cursor-pointer shrink-0"
+                      >
+                        {copiedText === familyPoolWallet ? 'คัดลอกแล้ว' : 'คัดลอก'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter Tabs */}
+              <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+                {[
+                  { key: 'all', label: '📋 ดูทั้งหมด (AllSell + Family Pool)' },
+                  { key: 'allsell', label: `🌐 ประวัติ AllSell 4% (${allSellHistoryList.length} รายการ)` },
+                  { key: 'family', label: `🏛️ ประวัติ Family Pool (${familyHistoryList.length} รายการ)` },
+                ].map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    onClick={() => setSystemPoolsModalTab(t.key as any)}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                      systemPoolsModalTab === t.key
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'text-slate-400 hover:text-white bg-slate-900/60'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* History Lists */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 font-mono text-[11px]">
+                {(systemPoolsModalTab === 'all' || systemPoolsModalTab === 'allsell') && (
+                  <div
+                    className={`bg-slate-950/90 border border-cyan-500/30 rounded-xl p-3 space-y-2 ${
+                      systemPoolsModalTab === 'allsell' ? 'lg:col-span-2' : ''
+                    }`}
+                  >
+                    <div className="font-bold text-cyan-300 flex items-center justify-between border-b border-slate-800 pb-1.5">
+                      <span>🌐 ประวัติรายได้ AllSell 4% ({allSellHistoryList.length} รายการ)</span>
+                      <span className="text-emerald-400 font-extrabold">+{totalAllSellUsdt.toFixed(2)} USDT</span>
+                    </div>
+                    {allSellHistoryList.length === 0 ? (
+                      <div className="text-slate-500 py-4 text-center">
+                        ยังไม่มีรายการเม็ดซ้ายในผังนี้ (เมื่อมีโหนดวางฝั่งซ้าย ระบบจะหัก 4% เข้า AllSell ทันที)
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                        {allSellHistoryList.map((item: any, idx: number) => (
+                          <div
+                            key={`allsell-hist-${idx}`}
+                            className="bg-slate-900/90 p-2 rounded-lg border border-slate-800 flex items-start justify-between gap-2"
+                          >
+                            <div>
+                              <span className="text-amber-300 font-bold">[Rank {item.rank}]</span>{' '}
+                              <span className="text-slate-200">{item.note}</span>
+                            </div>
+                            <span className="text-cyan-300 font-extrabold shrink-0">
+                              +{Number(item.amountUsdt).toFixed(2)} U
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(systemPoolsModalTab === 'all' || systemPoolsModalTab === 'family') && (
+                  <div
+                    className={`bg-slate-950/90 border border-fuchsia-500/30 rounded-xl p-3 space-y-2 ${
+                      systemPoolsModalTab === 'family' ? 'lg:col-span-2' : ''
+                    }`}
+                  >
+                    <div className="font-bold text-fuchsia-300 flex items-center justify-between border-b border-slate-800 pb-1.5">
+                      <span>🏛️ ประวัติรายได้ Family Pool ({familyHistoryList.length} รายการ)</span>
+                      <span className="text-amber-300 font-extrabold">+{totalFamilyUsdt.toFixed(2)} USDT</span>
+                    </div>
+                    {familyHistoryList.length === 0 ? (
+                      <div className="text-slate-500 py-4 text-center">
+                        ยังไม่มีรายการเม็ดซ้ายในผังนี้ (เมื่อมีโหนดวางฝั่งซ้าย ค่าชั้นที่เหลือจาก 15 ชั้น และ 30% จากโคลน #1 จะเข้า Family Pool ทันที)
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                        {familyHistoryList.map((item: any, idx: number) => (
+                          <div
+                            key={`family-hist-${idx}`}
+                            className="bg-slate-900/90 p-2 rounded-lg border border-slate-800 flex items-start justify-between gap-2"
+                          >
+                            <div>
+                              <span className="text-amber-300 font-bold">[Rank {item.rank}]</span>{' '}
+                              <span className="text-slate-200">{item.note}</span>
+                            </div>
+                            <span className="text-fuchsia-300 font-extrabold shrink-0">
+                              +{Number(item.amountUsdt).toFixed(2)} U
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex justify-end pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsSystemPoolsModalOpen(false)}
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs cursor-pointer transition"
                 >
                   ปิดหน้าต่าง
                 </button>

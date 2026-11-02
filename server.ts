@@ -4015,7 +4015,46 @@ async function startApp() {
         }
       }
 
-      // Compute exact 30% Direct, 30% Level (2% x 15), and 35% Upgrade Vault history per ID across Ranks 1..27
+      // Compute exact 30% Direct, 30% Level (2% x 15), 35% Upgrade Vault history per ID, AND AllSell (4%) + FamilyPool across Ranks 1..27
+      const allSellWalletAddr =
+        matrixDB.systemWallets?.allSellWallet || '0xBeFEB9871a20656aeF7E8d218f751e9C23FAF710';
+      const familyPoolWalletAddr =
+        matrixDB.systemWallets?.familyPool || '0x225DF4b5961f757f54728138F289Eaf49D4F275A';
+      const botWalletAddr =
+        matrixDB.systemWallets?.botWallet || '0xbFD03d4D69221085a63Dd372A5d59f952C084a56';
+
+      let allSellTotalUsdt = 0;
+      let familyPoolTotalUsdt = 0;
+      let familyPoolUnpaidLevelUsdt = 0;
+      let familyPoolRootCloneDirectUsdt = 0;
+      let botTotalUsdt = 0;
+
+      const allSellByRank: Record<number, number> = {};
+      const familyPoolByRank: Record<number, number> = {};
+      const allSellHistory: Array<{
+        rank: number;
+        fromNodeId: number;
+        fromMainId: number;
+        fromNodeType: string;
+        parentId: number;
+        amountUsdt: number;
+        recipient: string;
+        note: string;
+      }> = [];
+      const familyPoolHistory: Array<{
+        rank: number;
+        fromNodeId: number;
+        fromMainId: number;
+        fromNodeType: string;
+        parentId: number;
+        subType: 'UNPAID_LEVEL' | 'ROOT_CLONE_DIRECT';
+        paidTiers?: number;
+        unpaidTiers?: number;
+        amountUsdt: number;
+        recipient: string;
+        note: string;
+      }> = [];
+
       for (let rankNum = 1; rankNum <= 27; rankNum++) {
         const rNodes = matrixDB.nodesByRank[rankNum] || [];
         if (rNodes.length <= 1) continue;
@@ -4025,6 +4064,8 @@ async function startApp() {
         const vaultAmt = Number((unitPrice * 0.35).toFixed(2));
         const levelAmt = Number((unitPrice * 0.02).toFixed(2));
         const fullLevelExtraAmt = Number((unitPrice * 0.3).toFixed(2));
+        const allSellAmt = Number((unitPrice * 0.04).toFixed(2));
+        const botAmt = Number((unitPrice * 0.01).toFixed(2));
 
         const nodesMap = new Map<number, IndexedTreeNode>();
         for (const n of rNodes) nodesMap.set(n.id, n);
@@ -4045,6 +4086,21 @@ async function startApp() {
             : EXPLICIT_AUTO_MAIN_IDS.has(childCanonMainId) && rankNum === 1
             ? `Auto ID #${child.id}`
             : `Main #${childCanonMainId} (R${rankNum}-#${child.id})`;
+
+          // Every Left-Child placement generates 4% AllSell & 1% Bot
+          allSellTotalUsdt = Number((allSellTotalUsdt + allSellAmt).toFixed(4));
+          allSellByRank[rankNum] = Number(((allSellByRank[rankNum] || 0) + allSellAmt).toFixed(4));
+          botTotalUsdt = Number((botTotalUsdt + botAmt).toFixed(4));
+          allSellHistory.push({
+            rank: rankNum,
+            fromNodeId: id,
+            fromMainId: childCanonMainId,
+            fromNodeType: childTypeLabel,
+            parentId: parent.id,
+            amountUsdt: allSellAmt,
+            recipient: allSellWalletAddr,
+            note: `4% AllSell จาก ${childTypeLabel} (วางเม็ดซ้ายใต้ R${rankNum}-#${parent.id})`,
+          });
 
           const parentOrigin = nodesMap.get(parent.originMainId || parent.id) || parent;
           const isParentExtraLineage = Boolean(parent.isExtraId || parentOrigin.isExtraId);
@@ -4108,7 +4164,26 @@ async function startApp() {
 
           // 1. Direct 30%
           const isId1CloneChild = child.isClone && (childCanonMainId === 1 || parent.id === 1);
-          if (!isId1CloneChild) {
+          if (isId1CloneChild) {
+            familyPoolRootCloneDirectUsdt = Number(
+              (familyPoolRootCloneDirectUsdt + directAmt).toFixed(4)
+            );
+            familyPoolTotalUsdt = Number((familyPoolTotalUsdt + directAmt).toFixed(4));
+            familyPoolByRank[rankNum] = Number(
+              ((familyPoolByRank[rankNum] || 0) + directAmt).toFixed(4)
+            );
+            familyPoolHistory.push({
+              rank: rankNum,
+              fromNodeId: id,
+              fromMainId: childCanonMainId,
+              fromNodeType: childTypeLabel,
+              parentId: parent.id,
+              subType: 'ROOT_CLONE_DIRECT',
+              amountUsdt: directAmt,
+              recipient: familyPoolWalletAddr,
+              note: `30% ค่าแนะนำจากโคลนรหัส #1 (${childTypeLabel} วางซ้ายใต้ R${rankNum}-#${parent.id}) เข้า Family Pool`,
+            });
+          } else {
             let spMainId = child.directSponsorNodeId || 1;
             if (rankNum > 1 && childCanonMainId > 1) {
               const origR1 = r1Nodes.find((x) => x.id === childCanonMainId);
@@ -4171,12 +4246,14 @@ async function startApp() {
             }
           }
 
-          // 3. Level 30% (2% x 15 Tiers)
+          // 3. Level 30% (2% x 15 Tiers) + Unpaid tiers to Family Pool
           let currUp = child.parentId;
+          let paidTiersCount = 0;
           for (let tier = 1; tier <= 15; tier++) {
             if (currUp <= 0) break;
             const upNode = nodesMap.get(currUp);
             if (!upNode) break;
+            paidTiersCount++;
             const upCanonMainId = resolveCanonicalMainId(rankNum, upNode);
             const upMainRep = reportsMap.get(upCanonMainId);
             if (upMainRep) {
@@ -4214,7 +4291,50 @@ async function startApp() {
             }
             currUp = upNode.parentId;
           }
+
+          const unpaidTiersCount = Math.max(0, 15 - paidTiersCount);
+          if (unpaidTiersCount > 0) {
+            const unpaidAmt = Number((unpaidTiersCount * levelAmt).toFixed(4));
+            familyPoolUnpaidLevelUsdt = Number((familyPoolUnpaidLevelUsdt + unpaidAmt).toFixed(4));
+            familyPoolTotalUsdt = Number((familyPoolTotalUsdt + unpaidAmt).toFixed(4));
+            familyPoolByRank[rankNum] = Number(
+              ((familyPoolByRank[rankNum] || 0) + unpaidAmt).toFixed(4)
+            );
+            familyPoolHistory.push({
+              rank: rankNum,
+              fromNodeId: id,
+              fromMainId: childCanonMainId,
+              fromNodeType: childTypeLabel,
+              parentId: parent.id,
+              subType: 'UNPAID_LEVEL',
+              paidTiers: paidTiersCount,
+              unpaidTiers: unpaidTiersCount,
+              amountUsdt: Number(unpaidAmt.toFixed(2)),
+              recipient: familyPoolWalletAddr,
+              note: `ค่าชั้นส่วนที่เหลือ ${unpaidTiersCount} ชั้น (${unpaidTiersCount * 2}%) จาก ${childTypeLabel} (จ่ายอัพไลน์ ${paidTiersCount}/15 ชั้น) เข้า Family Pool`,
+            });
+          }
         }
+      }
+
+      // Query real-time on-chain USDT balances for AllSell, FamilyPool, and Bot wallets
+      let onChainAllSellBal = 0;
+      let onChainFamilyBal = 0;
+      let onChainBotBal = 0;
+      try {
+        const provider = getProvider();
+        const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_READ_ABI, provider);
+        const dec = activeUsdtDecimals || 18;
+        const [aBn, fBn, bBn] = await Promise.all([
+          usdtContract.balanceOf(allSellWalletAddr).catch(() => 0n),
+          usdtContract.balanceOf(familyPoolWalletAddr).catch(() => 0n),
+          usdtContract.balanceOf(botWalletAddr).catch(() => 0n),
+        ]);
+        onChainAllSellBal = Number(Number(ethers.formatUnits(aBn, dec)).toFixed(2));
+        onChainFamilyBal = Number(Number(ethers.formatUnits(fBn, dec)).toFixed(2));
+        onChainBotBal = Number(Number(ethers.formatUnits(bBn, dec)).toFixed(2));
+      } catch {
+        // Fallback to 0 if RPC timeout
       }
 
       // Compute remaining & deducted Vault for each ID
@@ -4237,6 +4357,25 @@ async function startApp() {
         lastSyncedAt: matrixDB.lastSyncedAt,
         totalIdsRank1: allReports.length,
         totalMainAndAutoIds: mainAndAutoReports.length,
+        systemPools: {
+          allSellWallet: allSellWalletAddr,
+          familyPoolWallet: familyPoolWalletAddr,
+          botWallet: botWalletAddr,
+          allSellTotalUsdt: Number(allSellTotalUsdt.toFixed(2)),
+          allSellByRank,
+          allSellHistory,
+          familyPoolTotalUsdt: Number(familyPoolTotalUsdt.toFixed(2)),
+          familyPoolUnpaidLevelUsdt: Number(familyPoolUnpaidLevelUsdt.toFixed(2)),
+          familyPoolRootCloneDirectUsdt: Number(familyPoolRootCloneDirectUsdt.toFixed(2)),
+          familyPoolByRank,
+          familyPoolHistory,
+          botTotalUsdt: Number(botTotalUsdt.toFixed(2)),
+          onChainBalances: {
+            allSellWalletUsdt: onChainAllSellBal,
+            familyPoolWalletUsdt: onChainFamilyBal,
+            botWalletUsdt: onChainBotBal,
+          },
+        },
         reports: allReports,
       });
     } catch (err: any) {
