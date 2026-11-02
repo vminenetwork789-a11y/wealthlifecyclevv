@@ -3665,9 +3665,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   </span>{' '}
                   <span className="text-emerald-300 font-bold">(โคลน R{node.rank}-#{node.id})</span>
                 </button>
-                <span className="px-1 py-0.2 rounded bg-emerald-500/25 text-emerald-300 font-sans font-bold text-[8.5px]">
-                  รอบ {node.cloneRound}
-                </span>
                 <span className="px-1 py-0.2 rounded bg-amber-500/15 border border-amber-500/40 text-amber-400 font-mono font-bold text-[9.5px]">
                   R{node.rank}
                 </span>
