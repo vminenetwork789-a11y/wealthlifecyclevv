@@ -17,6 +17,7 @@ import { calculateMainIdVaultPools } from './utils/vaultPools';
 export default function App() {
   const [language, setLanguage] = useState<'th' | 'en'>('th');
   const [isDeployModalOpen, setIsDeployModalOpen] = useState<boolean>(false);
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState<boolean>(false);
   const [selectedInspectRank, setSelectedInspectRank] = useState<number>(1);
   const [selectedVaultBalance, setSelectedVaultBalance] = useState<string>('0.00 USDT');
   const [bypassGateToDashboard, setBypassGateToDashboard] = useState<boolean>(false);
@@ -394,28 +395,45 @@ export default function App() {
           </div>
         )}
 
-        {/* User Profile & Balances */}
-        <UserProfileCard
-          account={account}
-          profile={profile}
-          isLoading={isLoadingProfile}
-          usdtBalance={usdtBalance}
-          bnbBalance={bnbBalance}
-          allowance={allowance}
+        {/* Binary Matrix Tree Visualizer */}
+        <MatrixTreeVisualizer
           language={language}
-          selectedInspectRank={selectedInspectRank}
-          selectedVaultBalance={selectedVaultBalance}
-          selectedMainId={selectedMainId}
-          ownedMainIds={profile?.ownedMainIdsRank1 || []}
-          onSelectMainId={setSelectedMainId}
-          upgradeRankPool={mainIdPools.upgradeRankPool}
-          newAutoIdPool={mainIdPools.newAutoIdPool}
-          newExtraIdPool={mainIdPools.newExtraIdPool}
+          userAddress={account}
+          chainId={chainId}
+          isBscTestnet={isBscTestnet}
+          contractAddress={contractAddress}
+          usdtBalance={usdtBalance}
+          allowance={allowance}
+          onConnectWallet={connectWallet}
+          onSwitchNetwork={switchToBscTestnet}
+          onApproveUsdt={handleApproveUsdt}
+          onRegisterWithSponsor={handleRegister}
+          onUpgradeToRank={handleUpgradeRank}
+          onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
+          currentUserRank={profile?.currentMaxRank || 1}
+          lastTxSuccess={txState.successMessage}
+          refreshTrigger={txState.successMessage}
         />
+      </main>
 
-        {/* Registration & Upgrade Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-8 items-start">
-          <div className="lg:col-span-5">
+      {/* Registration Popup Modal opened from Dashboard Status Widget / Summary Pill */}
+      {isRegisterModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm"
+          onClick={() => setIsRegisterModalOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-slate-950 border border-indigo-500/40 shadow-2xl p-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setIsRegisterModalOpen(false)}
+              className="absolute top-4 right-4 z-10 p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer"
+              title="ปิดหน้าต่าง"
+            >
+              <X className="w-4 h-4" />
+            </button>
             <RegisterSection
               account={account}
               isRegistered={profile?.isRegistered ?? false}
@@ -435,76 +453,8 @@ export default function App() {
               language={language}
             />
           </div>
-
-          <div className="lg:col-span-7">
-            <UpgradeRankSection
-              account={account}
-              currentRank={mainIdPools.currentRank}
-              allowance={allowance}
-              onUpgrade={handleUpgradeRank}
-              onProcessAutoNewMainId={handleProcessAutoNewMainId}
-              onProcessAutoExtraId={handleProcessAutoExtraId}
-              isLoading={txState.isLoading}
-              currentStep={txState.step}
-              language={language}
-              selectedMainId={selectedMainId}
-              ownedMainIds={profile?.ownedMainIdsRank1 || []}
-              onSelectMainId={setSelectedMainId}
-              upgradeRankPool={mainIdPools.upgradeRankPool}
-              newAutoIdPool={mainIdPools.newAutoIdPool}
-              newExtraIdPool={mainIdPools.newExtraIdPool}
-              window5Start={mainIdPools.window5Start}
-              window5End={mainIdPools.window5End}
-            />
-          </div>
         </div>
-
-        {/* Binary Matrix Tree Visualizer */}
-        <MatrixTreeVisualizer
-          language={language}
-          userAddress={account}
-          chainId={chainId}
-          isBscTestnet={isBscTestnet}
-          contractAddress={contractAddress}
-          usdtBalance={usdtBalance}
-          allowance={allowance}
-          onConnectWallet={connectWallet}
-          onSwitchNetwork={switchToBscTestnet}
-          onApproveUsdt={handleApproveUsdt}
-          onRegisterWithSponsor={handleRegister}
-          onUpgradeToRank={handleUpgradeRank}
-          currentUserRank={profile?.currentMaxRank || 1}
-          lastTxSuccess={txState.successMessage}
-          refreshTrigger={txState.successMessage}
-        />
-
-        {/* Rank Inspector & Admin Panel */}
-        <RankInspectorAndAdminPanel
-          account={account}
-          language={language}
-          selectedInspectRank={selectedInspectRank}
-          onSelectInspectRank={setSelectedInspectRank}
-          onInspectRank={inspectRankData}
-          onRefreshOnChainData={refreshUserData}
-          onAdminUpgrade={handleAdminUpgrade}
-          onVaultBalanceChange={setSelectedVaultBalance}
-          isLoading={txState.isLoading}
-          contractAddress={contractAddress}
-          usdtAddress={usdtAddress}
-          onUpdateContractAddress={updateSmartContractAddress}
-          onResetContractAddress={resetSmartContractAddress}
-        />
-
-        {/* On-Chain Event Logs */}
-        <EventLogsSection language={language} account={account} />
-
-        {/* Common Questions & Platform FAQ */}
-        <FAQSection
-          language={language}
-          contractAddress={contractAddress || CONTRACT_ADDRESS}
-          usdtAddress={usdtAddress || USDT_ADDRESS}
-        />
-      </main>
+      )}
 
       <DeployContractModal
         isOpen={isDeployModalOpen}

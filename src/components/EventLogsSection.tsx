@@ -60,10 +60,79 @@ function getFallbackRewardUsdt(rank: number, rewardType: string, unpaidTiersCoun
   return (unitPrice * 0.02).toFixed(2);
 }
 
+interface CommissionItem {
+  rank: number;
+  fromNodeId: number;
+  fromMainId: number;
+  fromNodeType: string;
+  toNodeId: number;
+  toMainId: number;
+  tier?: number;
+  amountUsdt: number;
+  note: string;
+}
+
+interface SpawnedIdItem {
+  id: number;
+  rank: number;
+  label: string;
+  type: 'AUTO_ID' | 'AUTO_EXTRA_ID' | 'CLONE_ID';
+  parentId: number;
+  side: 'LEFT' | 'RIGHT' | 'ROOT';
+  directSponsorNodeId: number;
+  owner: string;
+  cloneRound?: number;
+}
+
+interface PerIdReport {
+  id: number;
+  label: string;
+  nodeType: 'MANUAL_ID' | 'AUTO_ID' | 'CLONE_ID' | 'EXTRA_ID';
+  originMainId: number;
+  spawnedByMainId: number;
+  owner: string;
+  directSponsorNodeId: number;
+  parentId: number;
+  sideInR1: 'LEFT' | 'RIGHT' | 'ROOT';
+  leftChildR1: number;
+  rightChildR1: number;
+  currentMaxRank: number;
+  rankNodesList: Array<{
+    rank: number;
+    nodeId: number;
+    parentId: number;
+    side: string;
+    leftChild: number;
+    rightChild: number;
+    nodeVault: number;
+    rawNodeVault: number;
+  }>;
+  direct30TotalUsdt: number;
+  direct30History: CommissionItem[];
+  level30TotalUsdt: number;
+  level30History: CommissionItem[];
+  vault35GrossTotalUsdt: number;
+  vault35RemainingTotalUsdt: number;
+  vault35DeductedTotalUsdt: number;
+  vault35History: CommissionItem[];
+  pools: {
+    upgradeRankPool: number;
+    newAutoIdPool: number;
+    newExtraIdPool: number;
+  };
+  autoIdsSpawned: SpawnedIdItem[];
+  autoExtraIdsSpawned: SpawnedIdItem[];
+  clonesSpawned: SpawnedIdItem[];
+}
+
 export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, account }) => {
-  const [activeTab, setActiveTab] = useState<'rewards' | 'upgrades'>('rewards');
+  const [activeTab, setActiveTab] = useState<'per_id' | 'rewards' | 'upgrades'>('per_id');
   const [logs, setLogs] = useState<RewardLog[]>([]);
   const [upgradeLogs, setUpgradeLogs] = useState<RankUpgradeLog[]>([]);
+  const [perIdReports, setPerIdReports] = useState<PerIdReport[]>([]);
+  const [selectedIdFilter, setSelectedIdFilter] = useState<number>(0);
+  const [idTypeFilter, setIdTypeFilter] = useState<'all' | 'main_auto' | 'auto_only' | 'clone_only'>('main_auto');
+  const [expandedIdSet, setExpandedIdSet] = useState<Record<number, boolean>>({ 1: true, 2: true, 5: true, 15: true, 17: true });
   const [filterType, setFilterType] = useState<string>('all');
   const [upgradeRankFilter, setUpgradeRankFilter] = useState<number>(0);
   const [onlyMyWallet, setOnlyMyWallet] = useState<boolean>(false);
@@ -73,6 +142,10 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
   const [usdtDecimals, setUsdtDecimals] = useState<number>(6);
   const [syncStatus, setSyncStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const [lastSyncedAt, setLastSyncedAt] = useState<string>('');
+
+  const toggleExpandId = (idNum: number) => {
+    setExpandedIdSet((prev) => ({ ...prev, [idNum]: !prev[idNum] }));
+  };
 
   const formatRewardAmount = useCallback(
     (rawAmount: bigint, decimals: number, rank = 1, rewardType = 'DIRECT'): string => {
@@ -93,10 +166,22 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
   const fetchOnChainRewardEvents = useCallback(async (forceSync = false) => {
     setIsRefreshing(true);
 
-    // 1. อ่านข้อมูลประวัติการกระจายรางวัล + ประวัติการอัพแรงค์จาก Database ของเราเป็นหลัก (/api/rewards & /api/upgrades)
+    // 1. อ่านข้อมูลประวัติราย ID + ประวัติการกระจายรางวัล + ประวัติการอัพแรงค์จาก Database ของเราเป็นหลัก
     try {
+      const perIdUrl = forceSync ? '/api/matrix/per-id-history?forceSync=1' : '/api/matrix/per-id-history';
       const endpoint = forceSync ? '/api/rewards?forceSync=1' : '/api/rewards';
-      const dbRes = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+      const [dbRes, perIdRes] = await Promise.all([
+        fetch(endpoint, { headers: { Accept: 'application/json' } }),
+        fetch(perIdUrl, { headers: { Accept: 'application/json' } }).catch(() => null),
+      ]);
+
+      if (perIdRes && perIdRes.ok) {
+        const perIdJson = await perIdRes.json();
+        if (perIdJson?.success && Array.isArray(perIdJson.reports)) {
+          setPerIdReports(perIdJson.reports);
+        }
+      }
+
       if (dbRes.ok) {
         const dbJson = await dbRes.json();
         if (Array.isArray(dbJson?.upgradeLogs)) {
@@ -523,6 +608,27 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
     (a, b) => a - b
   );
 
+  const filteredPerIdReports = perIdReports.filter((rep) => {
+    if (onlyMyWallet && account) {
+      if (rep.owner.toLowerCase() !== account.toLowerCase()) return false;
+    }
+    if (selectedIdFilter > 0) {
+      return rep.id === selectedIdFilter;
+    }
+    if (idTypeFilter === 'main_auto') {
+      return rep.nodeType !== 'CLONE_ID';
+    }
+    if (idTypeFilter === 'auto_only') {
+      return rep.nodeType === 'AUTO_ID' || rep.autoIdsSpawned.length > 0 || rep.autoExtraIdsSpawned.length > 0;
+    }
+    if (idTypeFilter === 'clone_only') {
+      return rep.nodeType === 'CLONE_ID';
+    }
+    return true;
+  });
+
+  const mainAndAutoCount = perIdReports.filter((r) => r.nodeType !== 'CLONE_ID').length;
+
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
       {/* Header */}
@@ -542,7 +648,11 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
               />
             </div>
             <h3 className="text-lg font-bold text-emerald-400">
-              {activeTab === 'rewards'
+              {activeTab === 'per_id'
+                ? language === 'th'
+                  ? '📊 ประวัติราย ID (30% แนะนำ • 30% ค่าชั้น • 35% อัพเกรด • Auto ID & Extra ID)'
+                  : '📊 Per-ID Commission & Auto/Extra ID Breakdown'
+                : activeTab === 'rewards'
                 ? language === 'th'
                   ? '📡 ประวัติการกระจายรางวัลสด'
                   : '📡 Live Reward Events'
@@ -580,12 +690,29 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
         </div>
       </div>
 
-      {/* Mode Switcher Tabs: Reward Events vs Rank Upgrade History */}
-      <div className="flex items-center gap-2 my-3 bg-slate-950 p-1.5 rounded-xl border border-slate-800 text-xs">
+      {/* Mode Switcher Tabs: Per-ID Breakdown vs Reward Events vs Rank Upgrade History */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 my-3 bg-slate-950 p-1.5 rounded-xl border border-slate-800 text-xs">
+        <button
+          type="button"
+          onClick={() => setActiveTab('per_id')}
+          className={`py-2 px-3 rounded-lg font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+            activeTab === 'per_id'
+              ? 'bg-amber-600 text-white shadow-md shadow-amber-950/50'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          <span>
+            {language === 'th'
+              ? `สรุปรายได้ & Auto/Extra แยกแต่ละ ID (${perIdReports.length})`
+              : `Per-ID Breakdown (${perIdReports.length})`}
+          </span>
+        </button>
+
         <button
           type="button"
           onClick={() => setActiveTab('rewards')}
-          className={`flex-1 py-2 px-3 rounded-lg font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+          className={`py-2 px-3 rounded-lg font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
             activeTab === 'rewards'
               ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/50'
               : 'text-slate-400 hover:text-white'
@@ -602,7 +729,7 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
         <button
           type="button"
           onClick={() => setActiveTab('upgrades')}
-          className={`flex-1 py-2 px-3 rounded-lg font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+          className={`py-2 px-3 rounded-lg font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
             activeTab === 'upgrades'
               ? 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
               : 'text-slate-400 hover:text-white'
@@ -638,27 +765,464 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
         </div>
         <div className="bg-slate-950/90 border border-slate-800/80 rounded-xl p-2.5">
           <span className="text-slate-500 block">
-            {activeTab === 'rewards' ? 'Rank 1 Nodes' : 'หักจาก Vault สะสมรวม'}
+            {activeTab === 'upgrades' ? 'หักจาก Vault สะสมรวม' : 'Rank 1 Nodes ทั้งหมด'}
           </span>
           <span className="text-amber-300 font-bold">
-            {activeTab === 'rewards'
-              ? `${totalNodesRank1} โหนด`
-              : `-${totalVaultDeductedUsdt.toFixed(2)} USDT`}
+            {activeTab === 'upgrades'
+              ? `-${totalVaultDeductedUsdt.toFixed(2)} USDT`
+              : `${totalNodesRank1 || perIdReports.length} โหนด (หลัก/Auto ${mainAndAutoCount})`}
           </span>
         </div>
         <div className="bg-slate-950/90 border border-slate-800/80 rounded-xl p-2.5">
           <span className="text-slate-500 block">
-            {activeTab === 'rewards' ? 'ยอดรวมที่แสดง' : 'มูลค่าอัพแรงค์รวม (ส่วนต่าง)'}
+            {activeTab === 'upgrades' ? 'มูลค่าอัพแรงค์รวม (ส่วนต่าง)' : 'ยอดรวมรางวัลที่จ่าย'}
           </span>
           <span className="text-emerald-400 font-bold">
-            {activeTab === 'rewards'
-              ? `+${totalRewardUsdt.toFixed(2)} USDT`
-              : `${totalUpgradeVolumeUsdt.toFixed(2)} U (ส่วนต่าง ${totalWalletPaidUsdt.toFixed(2)} U)`}
+            {activeTab === 'upgrades'
+              ? `${totalUpgradeVolumeUsdt.toFixed(2)} U (ส่วนต่าง ${totalWalletPaidUsdt.toFixed(2)} U)`
+              : `+${totalRewardUsdt.toFixed(2)} USDT`}
           </span>
         </div>
       </div>
 
-      {activeTab === 'rewards' ? (
+      {activeTab === 'per_id' ? (
+        <div className="space-y-4">
+          {/* Filter Bar for Per-ID View */}
+          <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3 space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-slate-400 font-semibold mr-1">ประเภท ID:</span>
+                {[
+                  {
+                    key: 'main_auto',
+                    label: `รหัสหลัก + Auto ID (${mainAndAutoCount})`,
+                  },
+                  {
+                    key: 'all',
+                    label: `ทุกโหนดใน R1 รวมโคลน (${perIdReports.length})`,
+                  },
+                  {
+                    key: 'auto_only',
+                    label: 'เฉพาะที่มี Auto ID / Auto Extra ID',
+                  },
+                  {
+                    key: 'clone_only',
+                    label: `เฉพาะโคลน R1 (${perIdReports.filter((r) => r.nodeType === 'CLONE_ID').length})`,
+                  },
+                ].map((btn) => (
+                  <button
+                    key={btn.key}
+                    type="button"
+                    onClick={() => {
+                      setIdTypeFilter(btn.key as any);
+                      setSelectedIdFilter(0);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg transition cursor-pointer text-[11px] ${
+                      idTypeFilter === btn.key && selectedIdFilter === 0
+                        ? 'bg-amber-600 text-white font-bold'
+                        : 'bg-slate-900 text-slate-300 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+              </div>
+
+              {account && (
+                <button
+                  type="button"
+                  onClick={() => setOnlyMyWallet(!onlyMyWallet)}
+                  className={`px-2.5 py-1 rounded-lg transition cursor-pointer text-[11px] flex items-center gap-1.5 border ${
+                    onlyMyWallet
+                      ? 'bg-indigo-600 text-white border-indigo-500 font-semibold'
+                      : 'bg-slate-900 text-slate-400 hover:text-white border-slate-800'
+                  }`}
+                >
+                  <Wallet className="w-3 h-3" />
+                  <span>เฉพาะกระเป๋าฉัน</span>
+                </button>
+              )}
+            </div>
+
+            {/* Individual ID Selector Chips (#1 .. #27) */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-800/80">
+              <span className="text-slate-400 text-[11px] mr-1 font-semibold">เลือกดูเฉพาะ ID:</span>
+              <button
+                type="button"
+                onClick={() => setSelectedIdFilter(0)}
+                className={`px-2 py-0.5 rounded font-mono text-[11px] cursor-pointer transition ${
+                  selectedIdFilter === 0
+                    ? 'bg-emerald-600 text-white font-bold'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                }`}
+              >
+                แสดงทั้งหมด
+              </button>
+              {perIdReports.map((rep) => {
+                const badgeCls =
+                  rep.nodeType === 'AUTO_ID'
+                    ? 'border-amber-500/50 text-amber-300'
+                    : rep.nodeType === 'CLONE_ID'
+                    ? 'border-cyan-500/40 text-cyan-300'
+                    : 'border-indigo-500/50 text-indigo-300';
+                return (
+                  <button
+                    key={rep.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedIdFilter(rep.id);
+                      setExpandedIdSet((prev) => ({ ...prev, [rep.id]: true }));
+                    }}
+                    className={`px-2 py-0.5 rounded font-mono text-[11px] cursor-pointer border transition ${
+                      selectedIdFilter === rep.id
+                        ? 'bg-amber-500 text-slate-950 font-bold border-amber-400'
+                        : `bg-slate-900/90 hover:bg-slate-800 ${badgeCls}`
+                    }`}
+                  >
+                    #{rep.id}
+                    {rep.nodeType === 'AUTO_ID'
+                      ? ' (Auto)'
+                      : rep.nodeType === 'CLONE_ID'
+                      ? ` (โคลน#${rep.originMainId})`
+                      : ''}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Per-ID Cards List */}
+          <div className="space-y-3 max-h-[680px] overflow-y-auto pr-1">
+            {filteredPerIdReports.map((rep) => {
+              const isExpanded = Boolean(expandedIdSet[rep.id] || selectedIdFilter === rep.id);
+              const badgeStyle =
+                rep.nodeType === 'AUTO_ID'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : rep.nodeType === 'CLONE_ID'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                  : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40';
+              const badgeLabel =
+                rep.nodeType === 'AUTO_ID'
+                  ? `AUTO ID (เกิดจาก Main #${rep.spawnedByMainId})`
+                  : rep.nodeType === 'CLONE_ID'
+                  ? `CLONE ID (โคลนของ Main #${rep.originMainId})`
+                  : 'MANUAL ID (รหัสหลักสมัครตรง)';
+
+              return (
+                <div
+                  key={rep.id}
+                  className="bg-slate-950/95 border border-slate-800 hover:border-slate-700 rounded-xl p-4 transition space-y-3 text-xs"
+                >
+                  {/* Card Top Summary Row */}
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap font-mono">
+                        <span className="text-base font-extrabold text-white bg-slate-900 px-2.5 py-0.5 rounded-lg border border-slate-700">
+                          ID #{rep.id}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-md border text-[11px] font-bold ${badgeStyle}`}>
+                          {badgeLabel}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-bold">
+                          Max Rank: R{rep.currentMaxRank}
+                        </span>
+                        <span className="text-slate-400 text-[11px]">
+                          อัพไลน์ R1: #{rep.parentId} ({rep.sideInR1}) • ผู้แนะนำตรง: #{rep.directSponsorNodeId}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-2">
+                        <span>
+                          กระเป๋าเจ้าของ:{' '}
+                          <a
+                            href={`https://testnet.bscscan.com/address/${rep.owner}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-300 hover:underline"
+                          >
+                            {rep.owner}
+                          </a>
+                        </span>
+                        <span className="text-slate-600">•</span>
+                        <span>
+                          ลูกซ้าย R1: {rep.leftChildR1 > 0 ? `#${rep.leftChildR1}` : 'ว่าง'} | ลูกขวา R1:{' '}
+                          {rep.rightChildR1 > 0 ? `#${rep.rightChildR1}` : 'ว่าง'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleExpandId(rep.id)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-300 border border-slate-700 font-semibold text-xs cursor-pointer self-start lg:self-center shrink-0"
+                    >
+                      {isExpanded ? 'ซ่อนรายละเอียด ▲' : 'ดูประวัติละเอียด ▼'}
+                    </button>
+                  </div>
+
+                  {/* 5 Metric Summary Pills for this ID */}
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono text-[11px]">
+                    <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">1. ค่าแนะนำ 30% (Direct)</span>
+                      <span className="text-emerald-400 font-bold text-sm">
+                        +{rep.direct30TotalUsdt.toFixed(2)} USDT
+                      </span>
+                      <span className="text-slate-500 block text-[10px]">
+                        ({rep.direct30History.length} รายการ)
+                      </span>
+                    </div>
+
+                    <div className="bg-cyan-950/30 border border-cyan-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">2. ค่าชั้น 30% (2%x15 ชั้น)</span>
+                      <span className="text-cyan-300 font-bold text-sm">
+                        +{rep.level30TotalUsdt.toFixed(2)} USDT
+                      </span>
+                      <span className="text-slate-500 block text-[10px]">
+                        ({rep.level30History.length} รายการ)
+                      </span>
+                    </div>
+
+                    <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">3. สะสมอัพเกรด 35% (Vault)</span>
+                      <span className="text-indigo-300 font-bold text-sm">
+                        สะสม +{rep.vault35GrossTotalUsdt.toFixed(2)} U
+                      </span>
+                      <span className="text-amber-300 block text-[10px]">
+                        คงเหลือ {rep.vault35RemainingTotalUsdt.toFixed(2)} U (ใช้ไป {rep.vault35DeductedTotalUsdt.toFixed(2)} U)
+                      </span>
+                    </div>
+
+                    <div className="bg-amber-950/30 border border-amber-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">4. Auto ID (R1) ที่เกิด</span>
+                      <span className="text-amber-300 font-bold text-sm">
+                        {rep.autoIdsSpawned.length} รหัส
+                      </span>
+                      <span className="text-slate-400 block text-[10px] truncate">
+                        {rep.autoIdsSpawned.length > 0
+                          ? rep.autoIdsSpawned.map((a) => `#${a.id}`).join(', ')
+                          : rep.nodeType === 'AUTO_ID'
+                          ? `ตัวเองคือ Auto ID #${rep.id}`
+                          : 'ยังไม่มี'}
+                      </span>
+                    </div>
+
+                    <div className="bg-fuchsia-950/30 border border-fuchsia-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">5. Auto Extra ID (R2-27)</span>
+                      <span className="text-fuchsia-300 font-bold text-sm">
+                        {rep.autoExtraIdsSpawned.length} รหัส
+                      </span>
+                      <span className="text-slate-400 block text-[10px] truncate">
+                        {rep.autoExtraIdsSpawned.length > 0
+                          ? rep.autoExtraIdsSpawned.map((e) => `R${e.rank}-#${e.id}`).join(', ')
+                          : `โคลนสะสม ${rep.clonesSpawned.length} รหัส`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Expanded Detailed History for this ID */}
+                  {isExpanded && (
+                    <div className="pt-3 border-t border-slate-800/90 space-y-3">
+                      {/* Rank Presence & 3 Pools Breakdown */}
+                      <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3 space-y-2">
+                        <div className="font-bold text-slate-200 flex flex-wrap items-center justify-between gap-2">
+                          <span>📌 โหนดในแต่ละแรงค์ & ยอดคงเหลือ 3 กระปุก (35% Upgrade Vault Pools)</span>
+                          <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                            <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                              Pool 1 (อัพแรงค์): {rep.pools.upgradeRankPool.toFixed(2)} U
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              Pool 2 (สร้าง Auto ID): {rep.pools.newAutoIdPool.toFixed(2)} U
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30">
+                              Pool 3 (สร้าง Extra ID): {rep.pools.newExtraIdPool.toFixed(2)} U
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                          {rep.rankNodesList.map((rn) => (
+                            <span
+                              key={`${rn.rank}-${rn.nodeId}`}
+                              className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-slate-300"
+                            >
+                              <strong className="text-amber-300">R{rn.rank}-#{rn.nodeId}</strong> (ใต้ #{rn.parentId}{' '}
+                              {rn.side}) • ซ้าย:{rn.leftChild || '-'} ขวา:{rn.rightChild || '-'} • Vault คงเหลือ:{' '}
+                              <span className="text-emerald-400 font-bold">{rn.nodeVault.toFixed(2)}U</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Auto IDs, Auto Extra IDs, and Clones Spawned by this ID */}
+                      {(rep.autoIdsSpawned.length > 0 ||
+                        rep.autoExtraIdsSpawned.length > 0 ||
+                        rep.clonesSpawned.length > 0) && (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                          <div className="bg-slate-900/70 border border-amber-500/30 rounded-lg p-2.5 space-y-1.5">
+                            <div className="font-bold text-amber-300">
+                              🤖 รายการ Auto ID (R1) ของ ID #{rep.id} ({rep.autoIdsSpawned.length})
+                            </div>
+                            {rep.autoIdsSpawned.length === 0 ? (
+                              <div className="text-slate-500 text-[11px]">ยังไม่มี Auto ID ที่เกิดจากรหัสนี้</div>
+                            ) : (
+                              <div className="space-y-1 font-mono text-[11px]">
+                                {rep.autoIdsSpawned.map((a) => (
+                                  <div
+                                    key={`auto-${a.id}`}
+                                    className="bg-slate-950 px-2 py-1 rounded border border-slate-800 flex items-center justify-between"
+                                  >
+                                    <span className="text-amber-300 font-bold">{a.label}</span>
+                                    <span className="text-slate-400">
+                                      วางใต้ #{a.parentId} ({a.side})
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="bg-slate-900/70 border border-fuchsia-500/30 rounded-lg p-2.5 space-y-1.5">
+                            <div className="font-bold text-fuchsia-300">
+                              ✨ รายการ Auto Extra ID (R2-27) ของ ID #{rep.id} ({rep.autoExtraIdsSpawned.length})
+                            </div>
+                            {rep.autoExtraIdsSpawned.length === 0 ? (
+                              <div className="text-slate-500 text-[11px]">ยังไม่มี Auto Extra ID ที่เกิดจากรหัสนี้</div>
+                            ) : (
+                              <div className="space-y-1 font-mono text-[11px]">
+                                {rep.autoExtraIdsSpawned.map((ex) => (
+                                  <div
+                                    key={`extra-${ex.rank}-${ex.id}`}
+                                    className="bg-slate-950 px-2 py-1 rounded border border-slate-800 flex items-center justify-between"
+                                  >
+                                    <span className="text-fuchsia-300 font-bold">{ex.label}</span>
+                                    <span className="text-slate-400">
+                                      วางใต้ R{ex.rank}-#{ex.parentId} ({ex.side})
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="bg-slate-900/70 border border-cyan-500/30 rounded-lg p-2.5 space-y-1.5">
+                            <div className="font-bold text-cyan-300">
+                              ♻️ รายการโคลน 100% Rebirth ของ ID #{rep.id} ({rep.clonesSpawned.length})
+                            </div>
+                            {rep.clonesSpawned.length === 0 ? (
+                              <div className="text-slate-500 text-[11px]">ยังไม่มีโคลนที่แตกตัวจากรหัสนี้</div>
+                            ) : (
+                              <div className="space-y-1 font-mono text-[11px] max-h-36 overflow-y-auto">
+                                {rep.clonesSpawned.map((cl) => (
+                                  <div
+                                    key={`clone-${cl.rank}-${cl.id}`}
+                                    className="bg-slate-950 px-2 py-1 rounded border border-slate-800 flex items-center justify-between"
+                                  >
+                                    <span className="text-cyan-300 font-bold">
+                                      โคลน R{cl.rank}-#{cl.id} (รอบ {cl.cloneRound})
+                                    </span>
+                                    <span className="text-slate-400">
+                                      ใต้ R{cl.rank}-#{cl.parentId} ({cl.side})
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 3 Columns of Commission Transaction History: 30% Direct, 30% Level, 35% Vault */}
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5">
+                        {/* 1. Direct 30% History */}
+                        <div className="bg-slate-900/80 border border-emerald-500/30 rounded-lg p-2.5 space-y-1.5">
+                          <div className="font-bold text-emerald-400 flex items-center justify-between">
+                            <span>💵 ประวัติ 30% ค่าแนะนำ ({rep.direct30History.length})</span>
+                            <span className="font-mono">+{rep.direct30TotalUsdt.toFixed(2)} U</span>
+                          </div>
+                          {rep.direct30History.length === 0 ? (
+                            <div className="text-slate-500 text-[11px]">ยังไม่มีรายการค่าแนะนำ 30%</div>
+                          ) : (
+                            <div className="space-y-1 max-h-48 overflow-y-auto pr-1 font-mono text-[11px]">
+                              {rep.direct30History.map((item, idx) => (
+                                <div
+                                  key={`d-${idx}`}
+                                  className="bg-slate-950 p-1.5 rounded border border-slate-800/90 flex items-start justify-between gap-2"
+                                >
+                                  <div>
+                                    <span className="text-amber-300 font-bold">[R{item.rank}]</span>{' '}
+                                    <span className="text-slate-300">{item.note}</span>
+                                  </div>
+                                  <span className="text-emerald-400 font-bold shrink-0">
+                                    +{item.amountUsdt.toFixed(2)} U
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. Level 30% (2% x 15) History */}
+                        <div className="bg-slate-900/80 border border-cyan-500/30 rounded-lg p-2.5 space-y-1.5">
+                          <div className="font-bold text-cyan-300 flex items-center justify-between">
+                            <span>🪜 ประวัติ 30% ค่าชั้น ({rep.level30History.length})</span>
+                            <span className="font-mono">+{rep.level30TotalUsdt.toFixed(2)} U</span>
+                          </div>
+                          {rep.level30History.length === 0 ? (
+                            <div className="text-slate-500 text-[11px]">ยังไม่มีรายการค่าชั้น 2% (15 ชั้น)</div>
+                          ) : (
+                            <div className="space-y-1 max-h-48 overflow-y-auto pr-1 font-mono text-[11px]">
+                              {rep.level30History.map((item, idx) => (
+                                <div
+                                  key={`l-${idx}`}
+                                  className="bg-slate-950 p-1.5 rounded border border-slate-800/90 flex items-start justify-between gap-2"
+                                >
+                                  <div>
+                                    <span className="text-amber-300 font-bold">[R{item.rank}]</span>{' '}
+                                    <span className="text-slate-300">{item.note}</span>
+                                  </div>
+                                  <span className="text-cyan-300 font-bold shrink-0">
+                                    +{item.amountUsdt.toFixed(2)} U
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 3. Upgrade Vault 35% History */}
+                        <div className="bg-slate-900/80 border border-indigo-500/30 rounded-lg p-2.5 space-y-1.5">
+                          <div className="font-bold text-indigo-300 flex items-center justify-between">
+                            <span>🏦 ประวัติ 35% อัพเกรด ({rep.vault35History.length})</span>
+                            <span className="font-mono">สะสม +{rep.vault35GrossTotalUsdt.toFixed(2)} U</span>
+                          </div>
+                          {rep.vault35History.length === 0 ? (
+                            <div className="text-slate-500 text-[11px]">ยังไม่มีรายการเม็ดซ้ายเข้ากระปุก 35%</div>
+                          ) : (
+                            <div className="space-y-1 max-h-48 overflow-y-auto pr-1 font-mono text-[11px]">
+                              {rep.vault35History.map((item, idx) => (
+                                <div
+                                  key={`v-${idx}`}
+                                  className="bg-slate-950 p-1.5 rounded border border-slate-800/90 flex items-start justify-between gap-2"
+                                >
+                                  <div>
+                                    <span className="text-amber-300 font-bold">[R{item.rank}]</span>{' '}
+                                    <span className="text-slate-300">{item.note}</span>
+                                  </div>
+                                  <span className="text-indigo-300 font-bold shrink-0">
+                                    +{item.amountUsdt.toFixed(2)} U
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : activeTab === 'rewards' ? (
         <>
           {/* Filter Chips for Rewards */}
           <div className="flex flex-wrap items-center justify-between gap-2 my-3 text-xs">

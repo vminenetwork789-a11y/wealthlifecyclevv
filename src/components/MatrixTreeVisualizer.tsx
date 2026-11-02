@@ -112,7 +112,8 @@ interface MatrixTreeVisualizerProps {
     sponsorNodeId: number,
     autoOptions?: { targetParentId?: number | string; isLeft?: boolean }
   ) => Promise<any>;
-  onUpgradeToRank?: (targetRank: number) => Promise<any>;
+  onUpgradeToRank?: (targetRank: number, targetMainId?: number | string) => Promise<any>;
+  onOpenRegisterModal?: () => void;
   lastTxSuccess?: string | null;
   refreshTrigger?: any;
   contractAddress?: string;
@@ -569,6 +570,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   allowance = '0.00',
   onApproveUsdt,
   onRegisterWithSponsor,
+  onUpgradeToRank,
+  onOpenRegisterModal,
   lastTxSuccess,
   refreshTrigger,
   contractAddress,
@@ -671,8 +674,38 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     }
   };
 
-  // Track which Node ID currently has its "รายละเอียดผลประโยชน์" (Benefit Details) popover open
+  // Track which Node ID currently has its "รายละเอียดผลประโยชน์" (Benefit Details) popup modal open
   const [expandedBenefitNodeId, setExpandedBenefitNodeId] = useState<number | null>(null);
+  const [benefitModalTab, setBenefitModalTab] = useState<
+    'all' | 'direct30' | 'level30' | 'vault35' | 'auto_extra'
+  >('all');
+  const [perIdReportsMap, setPerIdReportsMap] = useState<Map<number, any>>(new Map());
+  const [modalUpgradeTargetRank, setModalUpgradeTargetRank] = useState<number>(2);
+  const [isModalUpgrading, setIsModalUpgrading] = useState<boolean>(false);
+  const [modalUpgradeMessage, setModalUpgradeMessage] = useState<string | null>(null);
+  const [modalUpgradeError, setModalUpgradeError] = useState<string | null>(null);
+
+  const fetchPerIdHistoryForModal = useCallback(async () => {
+    try {
+      const res = await fetch('/api/matrix/per-id-history');
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && Array.isArray(data.reports)) {
+          const map = new Map<number, any>();
+          for (const rep of data.reports) {
+            map.set(Number(rep.id), rep);
+          }
+          setPerIdReportsMap(map);
+        }
+      }
+    } catch {
+      // Ignore error
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPerIdHistoryForModal();
+  }, [fetchPerIdHistoryForModal, selectedRank, refreshTrigger, lastTxSuccess]);
 
   const [isLoadingTree, setIsLoadingTree] = useState<boolean>(false);
   const [totalNodesInRank, setTotalNodesInRank] = useState<number>(1);
@@ -3974,12 +4007,18 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
           )}
 
-          {/* Toggle Benefit Details Button */}
+          {/* Open Benefit & History Popup Modal Button */}
           <button
             type="button"
-            onClick={() =>
-              setExpandedBenefitNodeId((prev) => (prev === node.id ? null : node.id))
-            }
+            onClick={() => {
+              const curMaxR = node.targetMainIdCurrentRank || node.rank || 1;
+              setModalUpgradeTargetRank(Math.min(27, curMaxR + 1));
+              setModalUpgradeMessage(null);
+              setModalUpgradeError(null);
+              setBenefitModalTab('all');
+              setExpandedBenefitNodeId((prev) => (prev === node.id ? null : node.id));
+              fetchPerIdHistoryForModal();
+            }}
             className={`mt-1 w-full py-1 px-1.5 rounded-md font-bold text-[8.5px] flex items-center justify-between transition cursor-pointer ${
               isBenefitOpen
                 ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow'
@@ -3988,291 +4027,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           >
             <span className="flex items-center gap-0.5">
               <Coins className="w-2.5 h-2.5 text-indigo-300 shrink-0" />
-              <span>
-                {isBenefitOpen ? 'ย่อผลประโยชน์' : 'ดูผลประโยชน์'}
-              </span>
+              <span>ดูผลประโยชน์</span>
             </span>
-            {isBenefitOpen ? (
-              <ChevronUp className="w-2.5 h-2.5" />
-            ) : (
-              <ChevronDown className="w-2.5 h-2.5" />
-            )}
+            <ChevronDown className="w-2.5 h-2.5" />
           </button>
         </div>
-
-        {/* Expanded Benefit Details Popover Card */}
-        {isBenefitOpen && (
-          <div className="relative mt-2 w-[172px] sm:w-[203px] md:w-[215px] h-auto rounded-xl bg-[#0d1222] border-2 border-indigo-500/45 p-2.5 sm:p-3 shadow-[0_15px_45px_rgba(0,0,0,0.85)] z-30 text-left space-y-2">
-            {/* Top Pointer Arrow */}
-            <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 rotate-45 bg-[#0d1222] border-l-2 border-t-2 border-indigo-500/45" />
-
-            {/* Popover Header */}
-            <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-slate-800">
-              <div className="flex items-center gap-1 flex-wrap">
-                <Coins className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="font-extrabold text-white text-[11px] sm:text-xs">
-                  รายละเอียดผลประโยชน์
-                </span>
-                <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 font-mono font-extrabold text-amber-400 text-[10px]">
-                  {node.isExtraLineage
-                    ? node.extraMainLabel || `Extra R${node.rank}-#${node.originMainId}`
-                    : `#${node.r1MainId || node.originMainId} (${node.id})`}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setExpandedBenefitNodeId(null)}
-                className="p-1 rounded-md bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer shrink-0"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-
-            {node.isExtraLineage ? (
-              <div className="rounded-lg bg-[#0d1829] border border-cyan-500/45 p-2 space-y-1.5 text-[10px] h-auto">
-                <div className="flex items-center justify-between border-b border-cyan-500/20 pb-1">
-                  <span className="font-bold text-cyan-300">
-                    รายได้ที่เกิดจากเม็ดซ้าย (EXTRA ID)
-                  </span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-200 font-mono">
-                    ส่งให้ #{node.directUplineNodeId || 1}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-200 font-semibold">
-                    30% ค่าแนะนำ → #{node.directUplineNodeId || 1}:
-                  </span>
-                  <span className="font-mono font-extrabold text-emerald-400 text-[11px]">
-                    {node.leftChild > 0
-                      ? `+${((RANK_PRICES_USDT[node.rank - 1] || 10) * 0.3).toFixed(2)} U`
-                      : '0.00 U'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-200 font-semibold">
-                    30% ค่าชั้น → #{node.directUplineNodeId || 1}:
-                  </span>
-                  <span className="font-mono font-extrabold text-emerald-400 text-[11px]">
-                    {node.leftChild > 0
-                      ? `+${((RANK_PRICES_USDT[node.rank - 1] || 10) * 0.3).toFixed(2)} U`
-                      : '0.00 U'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
-                  <div>
-                    <span className="text-rose-300 font-bold block">Vault (35%):</span>
-                    <span className="text-[8.5px] text-slate-400 block font-mono">
-                      ส่งเข้า New Extra ID Pool ของ #{node.directUplineNodeId || 1}
-                    </span>
-                  </div>
-                  <span className="font-mono font-extrabold text-rose-400 text-[11px]">
-                    {node.leftChild > 0
-                      ? `+${((RANK_PRICES_USDT[node.rank - 1] || 10) * 0.35).toFixed(2)} U`
-                      : '0.00 U'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20 text-[9.5px]">
-                  <span className="text-slate-300">4% All Sell:</span>
-                  <span className="font-mono font-bold text-slate-200">
-                    {node.leftChild > 0
-                      ? `${((RANK_PRICES_USDT[node.rank - 1] || 10) * 0.04).toFixed(2)} U`
-                      : '0.00 U'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between text-[9.5px]">
-                  <span className="text-slate-300">1% Bot:</span>
-                  <span className="font-mono font-bold text-slate-200">
-                    {node.leftChild > 0
-                      ? `${((RANK_PRICES_USDT[node.rank - 1] || 10) * 0.01).toFixed(2)} U`
-                      : '0.00 U'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between pt-1 border-t border-cyan-500/20">
-                  <span className="text-purple-300 font-bold">โคลนนิ่ง (เม็ดขวา):</span>
-                  <span className="font-mono font-extrabold text-white">
-                    {node.totalClonesCount} รหัส
-                  </span>
-                </div>
-              </div>
-            ) : (
-              <>
-                {/* Box 1: ผลประโยชน์เฉพาะรหัสนี้ */}
-                <div className="rounded-lg bg-[#09191f] border border-emerald-500/40 p-2 space-y-1 text-[10px] h-auto">
-                  <div className="flex items-center justify-between border-b border-emerald-500/20 pb-1">
-                    <span className="font-bold text-emerald-400">
-                      {language === 'th'
-                        ? `ผลประโยชน์เฉพาะรหัสนี้ (#${node.id})`
-                        : `Earnings for Node (#${node.id})`}
-                    </span>
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono">
-                      {node.isClone ? 'Clone' : node.isExtraId ? 'Extra' : 'Main'}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-200 font-semibold">30% ค่าแนะนำตรง:</span>
-                    <span className="font-mono font-extrabold text-emerald-400 text-[11px]">
-                      +{node.directRewardThisNode.toFixed(2)} U
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-200 font-semibold">ยูนิเลเวล 15 ชั้น:</span>
-                    <span className="font-mono font-extrabold text-emerald-400 text-[11px]">
-                      +{node.unilevelRewardThisNode.toFixed(2)} U
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-1 border-t border-emerald-500/15">
-                    <span className="text-slate-200 font-semibold">Vault โหนดนี้ (35%):</span>
-                    <span className="font-mono font-extrabold text-amber-300 text-[11px]">
-                      +{node.vaultBalance.toFixed(2)} U
-                    </span>
-                  </div>
-                </div>
-
-                {/* Box 2: ผลประโยชน์สะสมเฉพาะรหัสหลักนี้ */}
-                <div className="rounded-lg bg-[#10162f] border border-indigo-500/40 p-2 space-y-1 text-[10px] h-auto">
-                  <div className="border-b border-indigo-500/20 pb-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-indigo-300">
-                        {language === 'th'
-                          ? `สะสมรหัสหลัก (#${node.r1MainId || node.originMainId})`
-                          : `Main ID #${node.r1MainId || node.originMainId}`}
-                      </span>
-                      <span className="text-[9px] px-1 py-0.2 rounded bg-indigo-500/20 text-indigo-300 font-mono font-semibold">
-                        แยกเงิน
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-200 font-semibold">30% ค่าแนะนำ:</span>
-                    <span className="font-mono font-extrabold text-indigo-300 text-[11px]">
-                      +{node.directRewardAllNodes.toFixed(2)} U
-                    </span>
-                  </div>
-
-                  {Boolean(node.familyPoolDirectFromLineage && node.familyPoolDirectFromLineage > 0) && (
-                    <div className="flex items-center justify-between text-[9px] text-amber-300/90">
-                      <span>↳ โคลน #{node.r1MainId || node.originMainId} ลงซ้าย:</span>
-                      <span className="font-mono font-bold">
-                        {node.familyPoolDirectFromLineage?.toFixed(2)} U
-                      </span>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between pb-1 border-b border-slate-800/90">
-                    <span className="text-slate-200 font-semibold">ยูนิเลเวล 15 ชั้น:</span>
-                    <span className="font-mono font-extrabold text-indigo-300 text-[11px]">
-                      +{node.unilevelRewardAllNodes.toFixed(2)} U
-                    </span>
-                  </div>
-
-                  {/* Pool Balances */}
-                  <div className="space-y-1 pt-1 pb-1 border-b border-slate-800/90">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="text-amber-400 font-bold block">Upgrade Rank Pool:</span>
-                        <span className="text-[8.5px] text-slate-400 block font-mono">
-                          (5 rank ย้อนหลัง: R{node.window5Start || 1}-R{node.targetMainIdCurrentRank || node.rank})
-                        </span>
-                      </div>
-                      <span className="font-mono font-extrabold text-amber-400 text-[11px]">
-                        {node.upgradeRankPool.toFixed(2)} U
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="text-yellow-400 font-bold block">New Auto ID Pool:</span>
-                        <span className="text-[8.5px] text-slate-400 block font-mono">
-                          (Vault R1-3 ลบ 5 rank ย้อนหลัง)
-                        </span>
-                      </div>
-                      <span className="font-mono font-extrabold text-yellow-400 text-[11px]">
-                        {node.newAutoIdPool.toFixed(2)} U
-                      </span>
-                    </div>
-                    {node.vault1To4BreakdownText ? (
-                      <div className="text-[9px] text-slate-400 text-right font-mono leading-relaxed">
-                        ({node.vault1To4BreakdownText})
-                      </div>
-                    ) : null}
-
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="text-rose-400 font-bold block">New Extra ID Pool:</span>
-                        <span className="text-[8.5px] text-slate-400 block font-mono">
-                          {node.targetMainIdCurrentRank === 27
-                            ? '(Vault R4-27 เต็มจำนวน • ลูป R27→R2 ออก Auto Extra ID)'
-                            : '(Vault R4-27 ลบ 5 rank ย้อนหลัง • ลูป R27→R2 ออก Auto Extra ID)'}
-                        </span>
-                      </div>
-                      <span className="font-mono font-extrabold text-rose-400 text-[11px]">
-                        {node.newExtraIdPool.toFixed(2)} U
-                      </span>
-                    </div>
-                    {node.vault4To27BreakdownText ? (
-                      <div className="text-[9px] text-slate-400 text-right font-mono leading-relaxed">
-                        ({node.vault4To27BreakdownText})
-                      </div>
-                    ) : null}
-                  </div>
-
-                  {/* Clone & Special ID Counts */}
-                  <div className="space-y-0.5 pt-0.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-purple-300 font-bold">โคลนนิ่ง:</span>
-                      <span className="font-mono font-extrabold text-white">
-                        {node.totalClonesCount} รหัส
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <span className="text-amber-400 font-bold">New Auto ID:</span>
-                      <span className="font-mono font-extrabold text-amber-400">
-                        {node.totalAutoIdCount} รหัส
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <span className="text-rose-400 font-bold">New Extra ID:</span>
-                      <span className="font-mono font-extrabold text-rose-400">
-                        {node.totalExtraIdCount} รหัส
-                      </span>
-                    </div>
-
-                    {node.isClone && (
-                      <div className="pt-1 mt-0.5 border-t border-slate-800 flex items-center justify-between text-[10px]">
-                        <span className="text-fuchsia-300 font-bold">รหัสหลัก:</span>
-                        <span className="font-mono font-bold text-amber-300">
-                          #{node.originMainId} (รอบ {node.cloneRound})
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Bottom Collapse Button */}
-            <button
-              type="button"
-              onClick={() => setExpandedBenefitNodeId(null)}
-              className="w-full py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-indigo-200 font-bold text-[10px] flex items-center justify-center gap-1 transition cursor-pointer"
-            >
-              <ChevronUp className="w-3.5 h-3.5" />
-              <span>ย่อรายละเอียด</span>
-            </button>
-          </div>
-        )}
       </div>
     );
   };
@@ -4326,17 +4085,36 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     <div className="w-full h-auto bg-[#0b1020] border border-slate-800 rounded-2xl sm:rounded-3xl p-3 sm:p-5 md:p-6 shadow-2xl space-y-3 sm:space-y-3.5">
       {/* Top Header & Controls Block (Stacked neatly matching screenshot) */}
       <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90">
-        {/* Row 1: Title */}
+        {/* Row 1: Title & Register Button */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
-            <span>🌳 ผังต้นไม้ไบนารี่ 27 Ranks</span>
-          </h2>
-          {justUpdatedBadge && (
-            <span className="text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400 font-semibold flex items-center gap-1 animate-pulse">
-              <Check className="w-3 h-3 text-emerald-300" />
-              <span>อัปเดตต่อผังอัตโนมัติแล้ว</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
+              <span>🌳 ผังต้นไม้ไบนารี่ 27 Ranks</span>
+            </h2>
+            {justUpdatedBadge && (
+              <span className="text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400 font-semibold flex items-center gap-1 animate-pulse">
+                <Check className="w-3 h-3 text-emerald-300" />
+                <span>อัปเดตต่อผังอัตโนมัติแล้ว</span>
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (onOpenRegisterModal) {
+                onOpenRegisterModal();
+              } else {
+                openRegisterModal(focusRootId || 1);
+              }
+            }}
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold text-xs shadow-lg shadow-emerald-950/60 border border-emerald-300/40 transition cursor-pointer flex items-center gap-1.5"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+            <span>
+              {language === 'th' ? '+ สมัครสมาชิก / ลงรหัสเพิ่ม' : '+ Register / Add ID'}
             </span>
-          )}
+          </button>
         </div>
 
         {/* Row 2: Contract Address Badge & Auto-Extend Status */}
@@ -5205,6 +4983,658 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           </div>
         </div>
       )}
+
+      {/* ===================================================================== */}
+      {/* POPUP MODAL: รายละเอียดผลประโยชน์ & ประวัติของไอดี (เมื่อกดปุ่ม ดูผลประโยชน์) */}
+      {/* ===================================================================== */}
+      {expandedBenefitNodeId !== null && activeNodesMap.has(expandedBenefitNodeId) && (() => {
+        const modalNode = activeNodesMap.get(expandedBenefitNodeId)!;
+        const targetMainId = modalNode.isExtraLineage
+          ? modalNode.directUplineNodeId || 1
+          : modalNode.r1MainId || modalNode.originMainId || modalNode.id;
+        const idReport =
+          (modalNode.rank === 1 && perIdReportsMap.get(modalNode.id)) ||
+          perIdReportsMap.get(targetMainId) ||
+          null;
+        const mainReport = perIdReportsMap.get(targetMainId) || idReport;
+
+        const directHistory: any[] = mainReport?.direct30History || [];
+        const levelHistory: any[] = mainReport?.level30History || [];
+        const vaultHistory: any[] = mainReport?.vault35History || [];
+        const autoIdsList: any[] = mainReport?.autoIdsSpawned || [];
+        const extraIdsList: any[] = mainReport?.autoExtraIdsSpawned || [];
+        const clonesList: any[] = mainReport?.clonesSpawned || [];
+        const rankNodesList: any[] = mainReport?.rankNodesList || [];
+
+        const currentMaxR = Math.max(
+          modalNode.targetMainIdCurrentRank || 1,
+          mainReport?.currentMaxRank || 1,
+          modalNode.rank || 1
+        );
+        const effectiveTargetRank =
+          modalUpgradeTargetRank > currentMaxR
+            ? modalUpgradeTargetRank
+            : Math.min(27, currentMaxR + 1);
+        const targetRankPrice = RANK_PRICES_USDT[effectiveTargetRank - 1] || 10;
+        const poolDeduct = Math.min(modalNode.upgradeRankPool, targetRankPrice);
+        const netDiffToPay = Math.max(0, Number((targetRankPrice - poolDeduct).toFixed(2)));
+
+        const handleTriggerModalUpgrade = async (rankToUpgrade: number) => {
+          if (isModalUpgrading || currentMaxR >= 27 || rankToUpgrade <= currentMaxR) return;
+          setIsModalUpgrading(true);
+          setModalUpgradeError(null);
+          setModalUpgradeMessage(
+            `กำลังอัปเกรด Main ID #${targetMainId} สู่ Rank ${rankToUpgrade} (${RANK_PRICES_USDT[rankToUpgrade - 1] || 10} USDT)...`
+          );
+          try {
+            if (onUpgradeToRank) {
+              await onUpgradeToRank(rankToUpgrade, targetMainId);
+            } else {
+              const res = await fetch('/api/matrix/upgrade', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  targetRank: rankToUpgrade,
+                  mainId: targetMainId,
+                  owner: modalNode.owner,
+                }),
+              });
+              const data = await res.json();
+              if (!res.ok || !data?.success) {
+                throw new Error(data?.error || 'ไม่สามารถอัปเกรดแรงค์ได้');
+              }
+            }
+            setModalUpgradeMessage(
+              `🚀 อัปเกรด Main ID #${targetMainId} สู่ Rank ${rankToUpgrade} สำเร็จเรียบร้อยแล้ว!`
+            );
+            setModalUpgradeTargetRank(Math.min(27, rankToUpgrade + 1));
+            await fetchPerIdHistoryForModal();
+            await loadOnChainTree(selectedRank, { silent: true, forceSync: true });
+          } catch (err: any) {
+            setModalUpgradeMessage(null);
+            setModalUpgradeError(err?.message || 'การอัปเกรดแรงค์ล้มเหลว');
+          } finally {
+            setIsModalUpgrading(false);
+          }
+        };
+
+        const titleBadge = modalNode.isExtraLineage
+          ? modalNode.extraMainLabel || `Extra R${modalNode.rank}-#${modalNode.originMainId}`
+          : modalNode.isClone
+          ? `Main #${targetMainId} (โคลน R${modalNode.rank}-#${modalNode.id})`
+          : modalNode.isAutoMainId
+          ? `Auto ID #${targetMainId} (R${modalNode.rank}-#${modalNode.id})`
+          : `Main ID #${targetMainId} (R${modalNode.rank}-#${modalNode.id})`;
+
+        const statusBadgeLabel = modalNode.isClone
+          ? 'CLONE ID'
+          : modalNode.isExtraId
+          ? 'EXTRA ID'
+          : modalNode.isAutoMainId
+          ? 'AUTO ID'
+          : 'MANUAL ID';
+
+        const statusBadgeClass = modalNode.isClone
+          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+          : modalNode.isExtraId
+          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+          : modalNode.isAutoMainId
+          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+          : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40';
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setExpandedBenefitNodeId(null)}
+          >
+            <div
+              className="w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-[#0b1022] border-2 border-indigo-500/50 rounded-2xl shadow-[0_25px_70px_rgba(0,0,0,0.9)] p-4 sm:p-6 space-y-4 text-xs"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-400">
+                      <Coins className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-base sm:text-lg font-extrabold text-white font-mono">
+                      {titleBadge}
+                    </h3>
+                    <span className={`px-2.5 py-0.5 rounded-full border font-mono font-bold text-[11px] ${statusBadgeClass}`}>
+                      {statusBadgeLabel}
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[11px]">
+                      Max Rank: R{currentMaxR}
+                    </span>
+                    {!modalNode.isExtraLineage && currentMaxR < 27 && (
+                      <button
+                        type="button"
+                        disabled={isModalUpgrading}
+                        onClick={() => handleTriggerModalUpgrade(effectiveTargetRank)}
+                        className="px-3 py-1 rounded-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-400 hover:to-rose-400 text-slate-950 font-extrabold text-[11px] shadow-md transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>
+                          {isModalUpgrading
+                            ? 'กำลังอัพเกรด...'
+                            : `🚀 อัพ Rank R${effectiveTargetRank}`}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-2">
+                    <span>
+                      กระเป๋า:{' '}
+                      <strong className="text-indigo-300">
+                        {modalNode.owner.slice(0, 8)}...{modalNode.owner.slice(-6)}
+                      </strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      อัพไลน์ใน R{modalNode.rank}:{' '}
+                      <strong className="text-white">
+                        {modalNode.parentId === 0 ? 'Root (#0)' : `#${modalNode.parentId}`}
+                      </strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      ผู้แนะนำตรง:{' '}
+                      <strong className="text-amber-300">
+                        #{modalNode.directUplineNodeId || mainReport?.directSponsorNodeId || 1}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setExpandedBenefitNodeId(null)}
+                  className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
+                  title="ปิดหน้าต่างป๊อปอัพ"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Status Banner when upgrading inside Modal */}
+              {(modalUpgradeMessage || modalUpgradeError) && (
+                <div
+                  className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between gap-2 ${
+                    modalUpgradeError
+                      ? 'bg-rose-950/60 border-rose-500/50 text-rose-200'
+                      : 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200'
+                  }`}
+                >
+                  <span>{modalUpgradeError || modalUpgradeMessage}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setModalUpgradeMessage(null);
+                      setModalUpgradeError(null);
+                    }}
+                    className="text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {/* Section 1: Summary Cards (Node Earnings + Main ID Cumulative & 3 Pools) */}
+              {modalNode.isExtraLineage ? (
+                <div className="rounded-xl bg-[#0d1829] border border-cyan-500/45 p-3.5 space-y-2 text-xs">
+                  <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2">
+                    <span className="font-bold text-cyan-300 text-sm">
+                      ✨ รายได้ที่เกิดจากเม็ดซ้ายของ EXTRA ID ({titleBadge})
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-200 font-mono font-bold">
+                      ส่งผลประโยชน์กลับให้ผู้แนะนำตรง #{modalNode.directUplineNodeId || 1}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-mono">
+                    <div className="bg-slate-950/80 border border-emerald-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">
+                        30% ค่าแนะนำ → ส่งให้ #{modalNode.directUplineNodeId || 1}
+                      </span>
+                      <span className="text-emerald-400 font-extrabold text-sm">
+                        {modalNode.leftChild > 0
+                          ? `+${((RANK_PRICES_USDT[modalNode.rank - 1] || 10) * 0.3).toFixed(2)} USDT`
+                          : '0.00 USDT'}
+                      </span>
+                    </div>
+                    <div className="bg-slate-950/80 border border-cyan-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">
+                        30% ค่าชั้น → ส่งให้ #{modalNode.directUplineNodeId || 1}
+                      </span>
+                      <span className="text-cyan-300 font-extrabold text-sm">
+                        {modalNode.leftChild > 0
+                          ? `+${((RANK_PRICES_USDT[modalNode.rank - 1] || 10) * 0.3).toFixed(2)} USDT`
+                          : '0.00 USDT'}
+                      </span>
+                    </div>
+                    <div className="bg-slate-950/80 border border-rose-500/30 rounded-lg p-2.5">
+                      <span className="text-slate-400 block text-[10px]">
+                        35% Vault → เข้า Extra Pool ของ #{modalNode.directUplineNodeId || 1}
+                      </span>
+                      <span className="text-rose-400 font-extrabold text-sm">
+                        {modalNode.leftChild > 0
+                          ? `+${((RANK_PRICES_USDT[modalNode.rank - 1] || 10) * 0.35).toFixed(2)} USDT`
+                          : '0.00 USDT'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Box 1: ผลประโยชน์เฉพาะโหนดที่กด */}
+                  <div className="rounded-xl bg-[#09191f] border border-emerald-500/40 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between border-b border-emerald-500/20 pb-1.5">
+                      <span className="font-bold text-emerald-400 text-xs sm:text-sm">
+                        📍 ผลประโยชน์เฉพาะโหนดนี้ (R{modalNode.rank}-#{modalNode.id})
+                      </span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono font-bold">
+                        {modalNode.isClone ? 'Clone Node' : 'Main Node'}
+                      </span>
+                    </div>
+                    <div className="space-y-1.5 font-mono text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-300">30% ค่าแนะนำตรง (เฉพาะโหนดนี้):</span>
+                        <span className="font-extrabold text-emerald-400">
+                          +{modalNode.directRewardThisNode.toFixed(2)} USDT
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-300">30% ค่าชั้น ยูนิเลเวล 15 ชั้น (เฉพาะโหนดนี้):</span>
+                        <span className="font-extrabold text-cyan-300">
+                          +{modalNode.unilevelRewardThisNode.toFixed(2)} USDT
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between pt-1.5 border-t border-emerald-500/20">
+                        <span className="text-slate-300">35% Vault โหนดนี้ (คงเหลือใน R{modalNode.rank}):</span>
+                        <span className="font-extrabold text-amber-300">
+                          +{modalNode.vaultBalance.toFixed(2)} USDT
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Box 2: ผลประโยชน์สะสมของรหัสหลัก & 3 Pools + ปุ่มอัพ Rank */}
+                  <div className="rounded-xl bg-[#10162f] border border-indigo-500/40 p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-indigo-500/20 pb-1.5">
+                      <span className="font-bold text-indigo-300 text-xs sm:text-sm">
+                        💎 สะสมรวมของรหัสหลัก (Main ID #{targetMainId} ทุกแรงค์)
+                      </span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono font-bold">
+                        แยกกระปุกอิสระ
+                      </span>
+                    </div>
+                    <div className="space-y-1 font-mono text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-300">รวม 30% ค่าแนะนำ (ทุกแรงค์):</span>
+                        <span className="font-extrabold text-emerald-400">
+                          +{(mainReport?.direct30TotalUsdt ?? modalNode.directRewardAllNodes).toFixed(2)} USDT
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-300">รวม 30% ค่าชั้น 15 ชั้น (ทุกแรงค์):</span>
+                        <span className="font-extrabold text-cyan-300">
+                          +{(mainReport?.level30TotalUsdt ?? modalNode.unilevelRewardAllNodes).toFixed(2)} USDT
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-300">รวม 35% อัพเกรดสะสมทั้งหมด (Gross Vault):</span>
+                        <span className="font-extrabold text-indigo-300">
+                          +{(mainReport?.vault35GrossTotalUsdt ?? 0).toFixed(2)} USDT
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5 pt-1.5 border-t border-indigo-500/20 text-[10px]">
+                        <div className="bg-slate-950/90 border border-amber-500/30 rounded p-1.5 text-center">
+                          <span className="text-slate-400 block">Upgrade Pool</span>
+                          <span className="text-amber-400 font-extrabold text-xs">
+                            {modalNode.upgradeRankPool.toFixed(2)} U
+                          </span>
+                        </div>
+                        <div className="bg-slate-950/90 border border-yellow-500/30 rounded p-1.5 text-center">
+                          <span className="text-slate-400 block">Auto ID Pool</span>
+                          <span className="text-yellow-400 font-extrabold text-xs">
+                            {modalNode.newAutoIdPool.toFixed(2)} U
+                          </span>
+                        </div>
+                        <div className="bg-slate-950/90 border border-rose-500/30 rounded p-1.5 text-center">
+                          <span className="text-slate-400 block">Extra ID Pool</span>
+                          <span className="text-rose-400 font-extrabold text-xs">
+                            {modalNode.newExtraIdPool.toFixed(2)} U
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* ปุ่มอัพเกรด Rank ของไอดีนี้โดยตรงในหน้าต่างป๊อปอัพ */}
+                      {currentMaxR >= 27 ? (
+                        <div className="mt-2 pt-2 border-t border-indigo-500/30 text-center">
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold text-[11px]">
+                            👑 รหัสหลัก #{targetMainId} อยู่ใน Rank สูงสุด (R27) เรียบร้อยแล้ว
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="mt-2 pt-2 border-t border-indigo-500/30 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-amber-300 font-bold">เลือก Rank ที่จะอัพ:</span>
+                              <select
+                                value={effectiveTargetRank}
+                                onChange={(e) => setModalUpgradeTargetRank(Number(e.target.value))}
+                                className="bg-slate-950 border border-amber-500/50 rounded-lg px-2 py-1 text-amber-300 font-mono font-bold text-xs focus:outline-none focus:border-amber-400 cursor-pointer"
+                              >
+                                {Array.from({ length: 27 - currentMaxR }, (_, idx) => {
+                                  const r = currentMaxR + 1 + idx;
+                                  const p = RANK_PRICES_USDT[r - 1] || 10;
+                                  return (
+                                    <option key={r} value={r}>
+                                      Rank {r} ({p.toLocaleString()} USDT)
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                            </div>
+                            <span className="text-[10px] text-slate-300 font-mono">
+                              หัก Pool:{' '}
+                              <strong className="text-amber-400">-{poolDeduct.toFixed(2)} U</strong> • จ่ายส่วนต่าง:{' '}
+                              <strong className="text-emerald-400">{netDiffToPay.toFixed(2)} U</strong>
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isModalUpgrading}
+                            onClick={() => handleTriggerModalUpgrade(effectiveTargetRank)}
+                            className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-indigo-600 hover:from-amber-400 hover:via-orange-400 hover:to-indigo-500 text-white font-extrabold text-xs shadow-lg shadow-indigo-950/60 border border-amber-300/40 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          >
+                            <Sparkles className="w-4 h-4 text-amber-200 shrink-0" />
+                            <span>
+                              {isModalUpgrading
+                                ? `กำลังอัพเกรด Main ID #${targetMainId} สู่ Rank ${effectiveTargetRank}...`
+                                : `🚀 อัพเกรด Main ID #${targetMainId} สู่ Rank ${effectiveTargetRank} (${targetRankPrice.toLocaleString()} USDT)`}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Section 2: History Filter Tabs inside Popup */}
+              <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+                {[
+                  { key: 'all', label: '📋 ดูทั้งหมดครบทุกหมวด' },
+                  { key: 'direct30', label: `💵 30% ค่าแนะนำ (${directHistory.length})` },
+                  { key: 'level30', label: `🪜 30% ค่าชั้น (${levelHistory.length})` },
+                  { key: 'vault35', label: `🏦 35% อัพเกรด (${vaultHistory.length})` },
+                  {
+                    key: 'auto_extra',
+                    label: `🤖 Auto ID (${autoIdsList.length}) • Extra ID (${extraIdsList.length}) • โคลน (${clonesList.length})`,
+                  },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setBenefitModalTab(tab.key as any)}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                      benefitModalTab === tab.key
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'text-slate-400 hover:text-white bg-slate-900/60'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Section 3: Auto ID, Auto Extra ID & Clone IDs of this ID */}
+              {(benefitModalTab === 'all' || benefitModalTab === 'auto_extra') && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                  {/* Auto IDs in R1 */}
+                  <div className="bg-slate-950/90 border border-amber-500/30 rounded-xl p-3 space-y-2">
+                    <div className="font-bold text-amber-300 flex items-center justify-between">
+                      <span>🤖 รหัส Auto ID (R1)</span>
+                      <span className="font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                        {autoIdsList.length} รหัส
+                      </span>
+                    </div>
+                    {autoIdsList.length === 0 ? (
+                      <div className="text-slate-500 text-[11px]">
+                        {modalNode.isAutoMainId
+                          ? `รหัสนี้คือ Auto ID #${targetMainId} (เกิดจาก Main #${mainReport?.spawnedByMainId || 1})`
+                          : 'ยังไม่มี Auto ID ที่เกิดจากรหัสนี้'}
+                      </div>
+                    ) : (
+                      <div className="space-y-1 max-h-40 overflow-y-auto font-mono text-[11px]">
+                        {autoIdsList.map((a: any) => (
+                          <div
+                            key={`modal-auto-${a.id}`}
+                            className="bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 flex items-center justify-between"
+                          >
+                            <span className="text-amber-300 font-bold">{a.label}</span>
+                            <span className="text-slate-400">
+                              ใต้ #{a.parentId} ({a.side})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Auto Extra IDs in R2-R27 */}
+                  <div className="bg-slate-950/90 border border-fuchsia-500/30 rounded-xl p-3 space-y-2">
+                    <div className="font-bold text-fuchsia-300 flex items-center justify-between">
+                      <span>✨ รหัส Auto Extra ID (R2-27)</span>
+                      <span className="font-mono px-2 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">
+                        {extraIdsList.length} รหัส
+                      </span>
+                    </div>
+                    {extraIdsList.length === 0 ? (
+                      <div className="text-slate-500 text-[11px]">ยังไม่มี Auto Extra ID ที่เกิดจากรหัสนี้</div>
+                    ) : (
+                      <div className="space-y-1 max-h-40 overflow-y-auto font-mono text-[11px]">
+                        {extraIdsList.map((ex: any) => (
+                          <div
+                            key={`modal-extra-${ex.rank}-${ex.id}`}
+                            className="bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 flex items-center justify-between"
+                          >
+                            <span className="text-fuchsia-300 font-bold">{ex.label}</span>
+                            <span className="text-slate-400">
+                              ใต้ R{ex.rank}-#{ex.parentId} ({ex.side})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clones 100% Rebirth */}
+                  <div className="bg-slate-950/90 border border-cyan-500/30 rounded-xl p-3 space-y-2">
+                    <div className="font-bold text-cyan-300 flex items-center justify-between">
+                      <span>♻️ รหัสโคลน 100% Rebirth</span>
+                      <span className="font-mono px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">
+                        {clonesList.length} รหัส
+                      </span>
+                    </div>
+                    {clonesList.length === 0 ? (
+                      <div className="text-slate-500 text-[11px]">ยังไม่มีโคลนที่แตกตัวจากรหัสนี้</div>
+                    ) : (
+                      <div className="space-y-1 max-h-40 overflow-y-auto font-mono text-[11px]">
+                        {clonesList.map((cl: any) => (
+                          <div
+                            key={`modal-clone-${cl.rank}-${cl.id}`}
+                            className="bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 flex items-center justify-between"
+                          >
+                            <span className="text-cyan-300 font-bold">
+                              โคลน R{cl.rank}-#{cl.id} (รอบ {cl.cloneRound})
+                            </span>
+                            <span className="text-slate-400">
+                              ใต้ R{cl.rank}-#{cl.parentId} ({cl.side})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Section 4: Commission History Lists (30% Direct / 30% Level / 35% Upgrade Vault) */}
+              {benefitModalTab !== 'auto_extra' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5">
+                  {/* 30% Direct Referral History */}
+                  {(benefitModalTab === 'all' || benefitModalTab === 'direct30') && (
+                    <div
+                      className={`bg-slate-950/90 border border-emerald-500/30 rounded-xl p-3 space-y-2 ${
+                        benefitModalTab === 'direct30' ? 'lg:col-span-3' : ''
+                      }`}
+                    >
+                      <div className="font-bold text-emerald-400 flex items-center justify-between border-b border-slate-800 pb-1.5">
+                        <span>💵 ประวัติ 30% ค่าแนะนำ ({directHistory.length} รายการ)</span>
+                        <span className="font-mono text-sm">
+                          +{(mainReport?.direct30TotalUsdt ?? modalNode.directRewardAllNodes).toFixed(2)} U
+                        </span>
+                      </div>
+                      {directHistory.length === 0 ? (
+                        <div className="text-slate-500 py-3 text-center">ยังไม่มีประวัติค่าแนะนำ 30%</div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1 font-mono text-[11px]">
+                          {directHistory.map((item: any, idx: number) => (
+                            <div
+                              key={`md-${idx}`}
+                              className="bg-slate-900/90 p-2 rounded-lg border border-slate-800 flex items-start justify-between gap-2"
+                            >
+                              <div>
+                                <span className="text-amber-300 font-bold">[Rank {item.rank}]</span>{' '}
+                                <span className="text-slate-200">{item.note}</span>
+                              </div>
+                              <span className="text-emerald-400 font-extrabold shrink-0">
+                                +{Number(item.amountUsdt).toFixed(2)} U
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 30% Level Bonus History */}
+                  {(benefitModalTab === 'all' || benefitModalTab === 'level30') && (
+                    <div
+                      className={`bg-slate-950/90 border border-cyan-500/30 rounded-xl p-3 space-y-2 ${
+                        benefitModalTab === 'level30' ? 'lg:col-span-3' : ''
+                      }`}
+                    >
+                      <div className="font-bold text-cyan-300 flex items-center justify-between border-b border-slate-800 pb-1.5">
+                        <span>🪜 ประวัติ 30% ค่าชั้น ({levelHistory.length} รายการ)</span>
+                        <span className="font-mono text-sm">
+                          +{(mainReport?.level30TotalUsdt ?? modalNode.unilevelRewardAllNodes).toFixed(2)} U
+                        </span>
+                      </div>
+                      {levelHistory.length === 0 ? (
+                        <div className="text-slate-500 py-3 text-center">ยังไม่มีประวัติค่าชั้น 2% (15 ชั้น)</div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1 font-mono text-[11px]">
+                          {levelHistory.map((item: any, idx: number) => (
+                            <div
+                              key={`ml-${idx}`}
+                              className="bg-slate-900/90 p-2 rounded-lg border border-slate-800 flex items-start justify-between gap-2"
+                            >
+                              <div>
+                                <span className="text-amber-300 font-bold">[Rank {item.rank}]</span>{' '}
+                                <span className="text-slate-200">{item.note}</span>
+                              </div>
+                              <span className="text-cyan-300 font-extrabold shrink-0">
+                                +{Number(item.amountUsdt).toFixed(2)} U
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 35% Upgrade Vault History */}
+                  {(benefitModalTab === 'all' || benefitModalTab === 'vault35') && (
+                    <div
+                      className={`bg-slate-950/90 border border-indigo-500/30 rounded-xl p-3 space-y-2 ${
+                        benefitModalTab === 'vault35' ? 'lg:col-span-3' : ''
+                      }`}
+                    >
+                      <div className="font-bold text-indigo-300 flex items-center justify-between border-b border-slate-800 pb-1.5">
+                        <span>🏦 ประวัติ 35% อัพเกรด ({vaultHistory.length} รายการ)</span>
+                        <span className="font-mono text-sm">
+                          สะสม +{(mainReport?.vault35GrossTotalUsdt ?? 0).toFixed(2)} U
+                        </span>
+                      </div>
+                      {vaultHistory.length === 0 ? (
+                        <div className="text-slate-500 py-3 text-center">ยังไม่มีประวัติเม็ดซ้ายเข้ากระปุก 35%</div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1 font-mono text-[11px]">
+                          {vaultHistory.map((item: any, idx: number) => (
+                            <div
+                              key={`mv-${idx}`}
+                              className="bg-slate-900/90 p-2 rounded-lg border border-slate-800 flex items-start justify-between gap-2"
+                            >
+                              <div>
+                                <span className="text-amber-300 font-bold">[Rank {item.rank}]</span>{' '}
+                                <span className="text-slate-200">{item.note}</span>
+                              </div>
+                              <span className="text-indigo-300 font-extrabold shrink-0">
+                                +{Number(item.amountUsdt).toFixed(2)} U
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Rank Nodes Summary Footer inside Modal */}
+              {rankNodesList.length > 0 && (
+                <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3 space-y-1.5">
+                  <div className="text-[11px] font-bold text-slate-300">
+                    📌 ตำแหน่งโหนดของ Main ID #{targetMainId} ในแต่ละแรงค์ (คลิกเพื่อสลับไปดูแรงค์นั้น):
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                    {rankNodesList.map((rn: any) => (
+                      <button
+                        key={`modal-rn-${rn.rank}-${rn.nodeId}`}
+                        type="button"
+                        onClick={() => {
+                          setSelectedRank(rn.rank);
+                          setFocusRootId(rn.nodeId);
+                          setExpandedBenefitNodeId(null);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 border border-slate-700 hover:border-indigo-500/50 text-slate-200 transition cursor-pointer"
+                      >
+                        <strong className="text-amber-300">R{rn.rank}-#{rn.nodeId}</strong> (ใต้ #{rn.parentId}{' '}
+                        {rn.side}) • Vault: <span className="text-emerald-400 font-bold">{rn.nodeVault.toFixed(2)}U</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Close Button Footer */}
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setExpandedBenefitNodeId(null)}
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs shadow-lg cursor-pointer transition"
+                >
+                  ปิดหน้าต่างป๊อปอัพ
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

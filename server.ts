@@ -3720,6 +3720,529 @@ async function startApp() {
     });
   });
 
+  app.get('/api/matrix/per-id-history', async (req: Request, res: Response) => {
+    try {
+      const forceSync = req.query.forceSync === '1';
+      if (forceSync || !matrixDB.nodesByRank[1] || matrixDB.nodesByRank[1].length <= 1) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, forceSync);
+      } else {
+        reconcileAutoExtraIdsAcrossRanks();
+        if (matrixDB.rewardLogs.length === 0) rebuildDatabaseRewardLogsFromNodes();
+        if (!matrixDB.upgradeLogs || matrixDB.upgradeLogs.length === 0) rebuildDatabaseUpgradeLogsFromNodes();
+      }
+
+      const r1Nodes = matrixDB.nodesByRank[1] || [];
+      const EXPLICIT_AUTO_MAIN_IDS = new Set<number>([9, 10, 13, 20, 21, 24, 25]);
+      const EXPLICIT_MANUAL_MAIN_IDS = new Set<number>([1, 2, 3, 5, 7, 15, 17, 18]);
+
+      // Helper to resolve canonical Rank 1 Main ID for any node in any rank
+      const resolveCanonicalMainId = (rankNum: number, node: IndexedTreeNode): number => {
+        if (node.isExtraId && !node.isClone) {
+          return node.directSponsorNodeId > 0 ? node.directSponsorNodeId : 1;
+        }
+        if (rankNum === 1) {
+          return node.isClone ? (node.originMainId || node.id) : node.id;
+        }
+        const rNodes = matrixDB.nodesByRank[rankNum] || [];
+        if (!node.isClone) {
+          return node.originMainId && node.originMainId > 0 ? node.originMainId : node.id;
+        }
+        const localMain = rNodes.find(
+          (m) => !m.isClone && !m.isExtraId && (m.id === node.originMainId || m.originMainId === node.originMainId)
+        );
+        if (localMain) {
+          return localMain.originMainId && localMain.originMainId > 0 ? localMain.originMainId : localMain.id;
+        }
+        return node.originMainId || 1;
+      };
+
+      interface CommissionItem {
+        rank: number;
+        fromNodeId: number;
+        fromMainId: number;
+        fromNodeType: string;
+        toNodeId: number;
+        toMainId: number;
+        tier?: number;
+        amountUsdt: number;
+        note: string;
+      }
+
+      interface SpawnedIdItem {
+        id: number;
+        rank: number;
+        label: string;
+        type: 'AUTO_ID' | 'AUTO_EXTRA_ID' | 'CLONE_ID';
+        parentId: number;
+        side: 'LEFT' | 'RIGHT' | 'ROOT';
+        directSponsorNodeId: number;
+        owner: string;
+        cloneRound?: number;
+      }
+
+      interface PerIdReport {
+        id: number;
+        label: string;
+        nodeType: 'MANUAL_ID' | 'AUTO_ID' | 'CLONE_ID' | 'EXTRA_ID';
+        originMainId: number;
+        spawnedByMainId: number;
+        owner: string;
+        directSponsorNodeId: number;
+        parentId: number;
+        sideInR1: 'LEFT' | 'RIGHT' | 'ROOT';
+        leftChildR1: number;
+        rightChildR1: number;
+        currentMaxRank: number;
+        rankNodesList: Array<{ rank: number; nodeId: number; parentId: number; side: string; leftChild: number; rightChild: number; nodeVault: number; rawNodeVault: number }>;
+        direct30TotalUsdt: number;
+        direct30History: CommissionItem[];
+        level30TotalUsdt: number;
+        level30History: CommissionItem[];
+        vault35GrossTotalUsdt: number;
+        vault35RemainingTotalUsdt: number;
+        vault35DeductedTotalUsdt: number;
+        vault35History: CommissionItem[];
+        pools: {
+          upgradeRankPool: number;
+          newAutoIdPool: number;
+          newExtraIdPool: number;
+        };
+        autoIdsSpawned: SpawnedIdItem[];
+        autoExtraIdsSpawned: SpawnedIdItem[];
+        clonesSpawned: SpawnedIdItem[];
+      }
+
+      const reportsMap = new Map<number, PerIdReport>();
+
+      for (const r1Node of r1Nodes) {
+        const pNode = r1Nodes.find((x) => x.id === r1Node.parentId);
+        const sideInR1: 'LEFT' | 'RIGHT' | 'ROOT' =
+          r1Node.parentId === 0
+            ? 'ROOT'
+            : pNode && pNode.leftChild === r1Node.id
+            ? 'LEFT'
+            : 'RIGHT';
+
+        const isAutoMain =
+          !r1Node.isClone &&
+          !r1Node.isExtraId &&
+          (EXPLICIT_AUTO_MAIN_IDS.has(r1Node.id) ||
+            (r1Node.originType === 'AUTO_NEW_MAIN' && !EXPLICIT_MANUAL_MAIN_IDS.has(r1Node.id)));
+
+        const nodeType: PerIdReport['nodeType'] = r1Node.isClone
+          ? 'CLONE_ID'
+          : r1Node.isExtraId
+          ? 'EXTRA_ID'
+          : isAutoMain
+          ? 'AUTO_ID'
+          : 'MANUAL_ID';
+
+        const origMainId = r1Node.isClone ? (r1Node.originMainId || r1Node.id) : r1Node.id;
+        const spawnedByMainId = isAutoMain
+          ? r1Node.directSponsorNodeId || 1
+          : r1Node.isClone
+          ? origMainId
+          : 0;
+
+        const stats = !r1Node.isClone
+          ? computeMainIdDatabaseStats(r1Node.id)
+          : {
+              currentRank: 1,
+              upgradeRankPool: 0,
+              newAutoIdPool: 0,
+              newExtraIdPool: 0,
+            };
+
+        const rankNodesList: PerIdReport['rankNodesList'] = [];
+        if (!r1Node.isClone && !r1Node.isExtraId) {
+          for (let r = 1; r <= 27; r++) {
+            const rList = matrixDB.nodesByRank[r] || [];
+            const mInR =
+              r === 1
+                ? r1Node
+                : rList.find((x) => !x.isClone && !x.isExtraId && x.originMainId === r1Node.id);
+            if (mInR) {
+              const pInR = rList.find((x) => x.id === mInR.parentId);
+              const sideR =
+                mInR.parentId === 0
+                  ? 'ROOT'
+                  : pInR && pInR.leftChild === mInR.id
+                  ? 'LEFT'
+                  : 'RIGHT';
+              rankNodesList.push({
+                rank: r,
+                nodeId: mInR.id,
+                parentId: mInR.parentId,
+                side: sideR,
+                leftChild: mInR.leftChild,
+                rightChild: mInR.rightChild,
+                nodeVault: Number((mInR.nodeVault || 0).toFixed(2)),
+                rawNodeVault: Number((mInR.rawNodeVault || mInR.nodeVault || 0).toFixed(2)),
+              });
+            }
+          }
+        } else {
+          rankNodesList.push({
+            rank: 1,
+            nodeId: r1Node.id,
+            parentId: r1Node.parentId,
+            side: sideInR1,
+            leftChild: r1Node.leftChild,
+            rightChild: r1Node.rightChild,
+            nodeVault: Number((r1Node.nodeVault || 0).toFixed(2)),
+            rawNodeVault: Number((r1Node.rawNodeVault || 0).toFixed(2)),
+          });
+        }
+
+        reportsMap.set(r1Node.id, {
+          id: r1Node.id,
+          label: r1Node.isClone
+            ? `Main #${origMainId} (โคลน R1-#${r1Node.id})`
+            : isAutoMain
+            ? `Auto ID #${r1Node.id}`
+            : `Main ID #${r1Node.id}`,
+          nodeType,
+          originMainId: origMainId,
+          spawnedByMainId,
+          owner: r1Node.owner,
+          directSponsorNodeId: r1Node.directSponsorNodeId || (r1Node.id === 1 ? 0 : 1),
+          parentId: r1Node.parentId,
+          sideInR1,
+          leftChildR1: r1Node.leftChild,
+          rightChildR1: r1Node.rightChild,
+          currentMaxRank: stats.currentRank,
+          rankNodesList,
+          direct30TotalUsdt: 0,
+          direct30History: [],
+          level30TotalUsdt: 0,
+          level30History: [],
+          vault35GrossTotalUsdt: 0,
+          vault35RemainingTotalUsdt: 0,
+          vault35DeductedTotalUsdt: 0,
+          vault35History: [],
+          pools: {
+            upgradeRankPool: stats.upgradeRankPool,
+            newAutoIdPool: stats.newAutoIdPool,
+            newExtraIdPool: stats.newExtraIdPool,
+          },
+          autoIdsSpawned: [],
+          autoExtraIdsSpawned: [],
+          clonesSpawned: [],
+        });
+      }
+
+      // Populate Auto IDs, Auto Extra IDs, and Clones across Ranks 1..27
+      for (const r1Node of r1Nodes) {
+        const isAutoMain =
+          !r1Node.isClone &&
+          !r1Node.isExtraId &&
+          (EXPLICIT_AUTO_MAIN_IDS.has(r1Node.id) ||
+            (r1Node.originType === 'AUTO_NEW_MAIN' && !EXPLICIT_MANUAL_MAIN_IDS.has(r1Node.id)));
+        if (isAutoMain) {
+          const spId = r1Node.directSponsorNodeId || 1;
+          const spReport = reportsMap.get(spId);
+          const pNode = r1Nodes.find((x) => x.id === r1Node.parentId);
+          const side: 'LEFT' | 'RIGHT' | 'ROOT' =
+            r1Node.parentId === 0 ? 'ROOT' : pNode && pNode.leftChild === r1Node.id ? 'LEFT' : 'RIGHT';
+          if (spReport) {
+            spReport.autoIdsSpawned.push({
+              id: r1Node.id,
+              rank: 1,
+              label: `Auto ID #${r1Node.id} (R1-#${r1Node.id})`,
+              type: 'AUTO_ID',
+              parentId: r1Node.parentId,
+              side,
+              directSponsorNodeId: spId,
+              owner: r1Node.owner,
+            });
+          }
+        }
+      }
+
+      for (let rankNum = 1; rankNum <= 27; rankNum++) {
+        const rNodes = matrixDB.nodesByRank[rankNum] || [];
+        if (rNodes.length <= 1) continue;
+        const nodesMap = new Map<number, IndexedTreeNode>();
+        for (const n of rNodes) nodesMap.set(n.id, n);
+
+        for (const n of rNodes) {
+          if (n.id <= 1) continue;
+          const pNode = nodesMap.get(n.parentId);
+          const side: 'LEFT' | 'RIGHT' | 'ROOT' =
+            n.parentId === 0 ? 'ROOT' : pNode && pNode.leftChild === n.id ? 'LEFT' : 'RIGHT';
+
+          if (n.isExtraId && !n.isClone) {
+            // Find which Rank 1 Main ID spawned this Extra ID
+            const localSpId = n.directSponsorNodeId || 1;
+            const localSpNode = nodesMap.get(localSpId);
+            const r1MainSpId =
+              rankNum === 1
+                ? localSpId
+                : localSpNode
+                ? resolveCanonicalMainId(rankNum, localSpNode)
+                : localSpId;
+            const spReport = reportsMap.get(r1MainSpId) || reportsMap.get(1);
+            if (spReport) {
+              spReport.autoExtraIdsSpawned.push({
+                id: n.id,
+                rank: rankNum,
+                label: `Extra R${rankNum}-#${n.id}`,
+                type: 'AUTO_EXTRA_ID',
+                parentId: n.parentId,
+                side,
+                directSponsorNodeId: r1MainSpId,
+                owner: n.owner,
+              });
+            }
+          } else if (n.isClone) {
+            const canonMainId = resolveCanonicalMainId(rankNum, n);
+            const mainReport = reportsMap.get(canonMainId);
+            if (mainReport) {
+              mainReport.clonesSpawned.push({
+                id: n.id,
+                rank: rankNum,
+                label: `Main #${canonMainId} (โคลน R${rankNum}-#${n.id})`,
+                type: 'CLONE_ID',
+                parentId: n.parentId,
+                side,
+                directSponsorNodeId: n.directSponsorNodeId || mainReport.directSponsorNodeId,
+                owner: n.owner,
+                cloneRound: n.cloneRound || 1,
+              });
+            }
+          }
+        }
+      }
+
+      // Compute exact 30% Direct, 30% Level (2% x 15), and 35% Upgrade Vault history per ID across Ranks 1..27
+      for (let rankNum = 1; rankNum <= 27; rankNum++) {
+        const rNodes = matrixDB.nodesByRank[rankNum] || [];
+        if (rNodes.length <= 1) continue;
+
+        const unitPrice = RANK_PRICES_USDT[rankNum - 1] || 5;
+        const directAmt = Number((unitPrice * 0.3).toFixed(2));
+        const vaultAmt = Number((unitPrice * 0.35).toFixed(2));
+        const levelAmt = Number((unitPrice * 0.02).toFixed(2));
+        const fullLevelExtraAmt = Number((unitPrice * 0.3).toFixed(2));
+
+        const nodesMap = new Map<number, IndexedTreeNode>();
+        for (const n of rNodes) nodesMap.set(n.id, n);
+
+        const sortedIds = Array.from(nodesMap.keys()).sort((a, b) => a - b);
+
+        for (const id of sortedIds) {
+          if (id <= 1) continue;
+          const child = nodesMap.get(id)!;
+          const parent = nodesMap.get(child.parentId);
+          if (!parent || parent.leftChild !== id) continue;
+
+          const childCanonMainId = resolveCanonicalMainId(rankNum, child);
+          const childTypeLabel = child.isExtraId
+            ? `Extra R${rankNum}-#${child.id}`
+            : child.isClone
+            ? `โคลน R${rankNum}-#${child.id} (ของ Main #${childCanonMainId})`
+            : EXPLICIT_AUTO_MAIN_IDS.has(childCanonMainId) && rankNum === 1
+            ? `Auto ID #${child.id}`
+            : `Main #${childCanonMainId} (R${rankNum}-#${child.id})`;
+
+          const parentOrigin = nodesMap.get(parent.originMainId || parent.id) || parent;
+          const isParentExtraLineage = Boolean(parent.isExtraId || parentOrigin.isExtraId);
+
+          if (isParentExtraLineage) {
+            const extraSpLocalId =
+              parentOrigin.directSponsorNodeId > 0
+                ? parentOrigin.directSponsorNodeId
+                : parent.directSponsorNodeId > 0
+                ? parent.directSponsorNodeId
+                : 1;
+            const extraSpNode = nodesMap.get(extraSpLocalId);
+            const targetMainId =
+              rankNum === 1
+                ? extraSpLocalId
+                : extraSpNode
+                ? resolveCanonicalMainId(rankNum, extraSpNode)
+                : extraSpLocalId;
+
+            const rep = reportsMap.get(targetMainId);
+            if (rep) {
+              rep.direct30TotalUsdt = Number((rep.direct30TotalUsdt + directAmt).toFixed(2));
+              rep.direct30History.push({
+                rank: rankNum,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: extraSpLocalId,
+                toMainId: targetMainId,
+                amountUsdt: directAmt,
+                note: `30% ค่าแนะนำจากเม็ดซ้ายของ Extra R${rankNum}-#${parent.id} ส่งกลับผู้แนะนำ Main #${targetMainId}`,
+              });
+
+              rep.level30TotalUsdt = Number((rep.level30TotalUsdt + fullLevelExtraAmt).toFixed(2));
+              rep.level30History.push({
+                rank: rankNum,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: extraSpLocalId,
+                toMainId: targetMainId,
+                tier: 1,
+                amountUsdt: fullLevelExtraAmt,
+                note: `30% ค่าชั้นเต็มจำนวนจากเม็ดซ้ายของ Extra R${rankNum}-#${parent.id} ส่งกลับผู้แนะนำ Main #${targetMainId}`,
+              });
+
+              rep.vault35GrossTotalUsdt = Number((rep.vault35GrossTotalUsdt + vaultAmt).toFixed(2));
+              rep.vault35History.push({
+                rank: rankNum,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: extraSpLocalId,
+                toMainId: targetMainId,
+                amountUsdt: vaultAmt,
+                note: `35% Vault จากเม็ดซ้ายของ Extra R${rankNum}-#${parent.id} ส่งเข้า New Extra ID Pool ของ Main #${targetMainId}`,
+              });
+            }
+            continue;
+          }
+
+          // 1. Direct 30%
+          const isId1CloneChild = child.isClone && (childCanonMainId === 1 || parent.id === 1);
+          if (!isId1CloneChild) {
+            let spMainId = child.directSponsorNodeId || 1;
+            if (rankNum > 1 && childCanonMainId > 1) {
+              const origR1 = r1Nodes.find((x) => x.id === childCanonMainId);
+              if (origR1 && origR1.directSponsorNodeId > 0) {
+                spMainId = origR1.directSponsorNodeId;
+              }
+            }
+            const spRep = reportsMap.get(spMainId);
+            if (spRep) {
+              spRep.direct30TotalUsdt = Number((spRep.direct30TotalUsdt + directAmt).toFixed(2));
+              spRep.direct30History.push({
+                rank: rankNum,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: spMainId,
+                toMainId: spMainId,
+                amountUsdt: directAmt,
+                note: `30% ค่าแนะนำตรงจาก ${childTypeLabel} (วางซ้ายใต้ R${rankNum}-#${parent.id})`,
+              });
+            }
+          }
+
+          // 2. Upgrade Vault 35% (goes to Parent's Canonical Main ID, and also recorded on the Clone ID if parent is a R1 Clone)
+          const parentCanonMainId = resolveCanonicalMainId(rankNum, parent);
+          const parentMainRep = reportsMap.get(parentCanonMainId);
+          if (parentMainRep) {
+            parentMainRep.vault35GrossTotalUsdt = Number(
+              (parentMainRep.vault35GrossTotalUsdt + vaultAmt).toFixed(2)
+            );
+            parentMainRep.vault35History.push({
+              rank: rankNum,
+              fromNodeId: id,
+              fromMainId: childCanonMainId,
+              fromNodeType: childTypeLabel,
+              toNodeId: parent.id,
+              toMainId: parentCanonMainId,
+              amountUsdt: vaultAmt,
+              note: parent.isClone
+                ? `35% อัพเกรดจากเม็ดซ้ายของโคลน R${rankNum}-#${parent.id} สะสมเข้ากระปุก Main #${parentCanonMainId}`
+                : `35% อัพเกรดจากเม็ดซ้ายของ R${rankNum}-#${parent.id} สะสมเข้ากระปุก Main #${parentCanonMainId}`,
+            });
+          }
+          if (rankNum === 1 && parent.isClone && parent.id !== parentCanonMainId) {
+            const cloneRep = reportsMap.get(parent.id);
+            if (cloneRep) {
+              cloneRep.vault35GrossTotalUsdt = Number(
+                (cloneRep.vault35GrossTotalUsdt + vaultAmt).toFixed(2)
+              );
+              cloneRep.vault35History.push({
+                rank: 1,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: parent.id,
+                toMainId: parentCanonMainId,
+                amountUsdt: vaultAmt,
+                note: `35% อัพเกรดจากเม็ดซ้ายใต้โคลน #${parent.id} (โอนเข้ากระปุกรหัสหลัก Main #${parentCanonMainId})`,
+              });
+            }
+          }
+
+          // 3. Level 30% (2% x 15 Tiers)
+          let currUp = child.parentId;
+          for (let tier = 1; tier <= 15; tier++) {
+            if (currUp <= 0) break;
+            const upNode = nodesMap.get(currUp);
+            if (!upNode) break;
+            const upCanonMainId = resolveCanonicalMainId(rankNum, upNode);
+            const upMainRep = reportsMap.get(upCanonMainId);
+            if (upMainRep) {
+              upMainRep.level30TotalUsdt = Number((upMainRep.level30TotalUsdt + levelAmt).toFixed(2));
+              upMainRep.level30History.push({
+                rank: rankNum,
+                fromNodeId: id,
+                fromMainId: childCanonMainId,
+                fromNodeType: childTypeLabel,
+                toNodeId: upNode.id,
+                toMainId: upCanonMainId,
+                tier,
+                amountUsdt: levelAmt,
+                note: upNode.isClone
+                  ? `ค่าชั้น 2% (ชั้นที่ ${tier}) จาก ${childTypeLabel} ผ่านโคลน R${rankNum}-#${upNode.id} เข้า Main #${upCanonMainId}`
+                  : `ค่าชั้น 2% (ชั้นที่ ${tier}) จาก ${childTypeLabel} เข้า R${rankNum}-#${upNode.id} (Main #${upCanonMainId})`,
+              });
+            }
+            if (rankNum === 1 && upNode.isClone && upNode.id !== upCanonMainId) {
+              const cloneRep = reportsMap.get(upNode.id);
+              if (cloneRep) {
+                cloneRep.level30TotalUsdt = Number((cloneRep.level30TotalUsdt + levelAmt).toFixed(2));
+                cloneRep.level30History.push({
+                  rank: 1,
+                  fromNodeId: id,
+                  fromMainId: childCanonMainId,
+                  fromNodeType: childTypeLabel,
+                  toNodeId: upNode.id,
+                  toMainId: upCanonMainId,
+                  tier,
+                  amountUsdt: levelAmt,
+                  note: `ค่าชั้น 2% (ชั้นที่ ${tier}) จาก ${childTypeLabel} ผ่านโคลน #${upNode.id} (ของ Main #${upCanonMainId})`,
+                });
+              }
+            }
+            currUp = upNode.parentId;
+          }
+        }
+      }
+
+      // Compute remaining & deducted Vault for each ID
+      for (const rep of reportsMap.values()) {
+        const rem = rep.rankNodesList.reduce((acc, rItem) => acc + Number(rItem.nodeVault || 0), 0);
+        rep.vault35RemainingTotalUsdt = Number(rem.toFixed(2));
+        rep.vault35DeductedTotalUsdt = Number(
+          Math.max(0, rep.vault35GrossTotalUsdt - rep.vault35RemainingTotalUsdt).toFixed(2)
+        );
+      }
+
+      const allReports = Array.from(reportsMap.values()).sort((a, b) => a.id - b.id);
+      const mainAndAutoReports = allReports.filter((r) => r.nodeType !== 'CLONE_ID');
+
+      res.json({
+        success: true,
+        source: 'DATABASE',
+        contractAddress: matrixDB.contractAddress,
+        lastSyncedBlock: matrixDB.lastSyncedBlock,
+        lastSyncedAt: matrixDB.lastSyncedAt,
+        totalIdsRank1: allReports.length,
+        totalMainAndAutoIds: mainAndAutoReports.length,
+        reports: allReports,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   app.post('/api/matrix/upgrade', async (req: Request, res: Response) => {
     try {
       const { targetRank, mainId, owner } = req.body;
