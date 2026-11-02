@@ -27,22 +27,26 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Persistent Database / Store File for Contract Address & Settings
 const CONFIG_FILE_PATH = path.resolve(__dirname, 'prisma/contract-config.json');
 
 const DEFAULT_SYSTEM_CONFIG = {
-  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || '0xC71A9a677D9Ef61A9133d6E6545306A11bD3eE5a',
+  contractAddress:
+    process.env.OVERRIDE_CONTRACT_ADDRESS ||
+    process.env.CONTRACT_ADDRESS ||
+    '0x2df74a86Df9D32c735755e1F448a98F4cdA456c5',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
-  chainId: 97,
-  networkName: 'BNB Smart Chain Testnet',
+  chainId: Number(process.env.CHAIN_ID || 97),
+  networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
   rpcUrl: process.env.RPC_URL || 'https://bsc-testnet-rpc.publicnode.com',
-  blockExplorerUrl: 'https://testnet.bscscan.com',
+  blockExplorerUrl: process.env.BLOCK_EXPLORER_URL || 'https://testnet.bscscan.com',
   updatedAt: new Date().toISOString(),
 };
 
 const SERVER_LEGACY_CONTRACTS = new Set([
+  '0xc71a9a677d9ef61a9133d6e6545306a11bd3ee5a',
   '0x87e9f1b9a63eb65c91fca718c5af1cee4eec6209',
   '0x675cdb85d9a843ac3e87b42beb7A606da79882e8',
   '0xae3736ecd23dfb6c49b76ef8548391c1b6fff7b9',

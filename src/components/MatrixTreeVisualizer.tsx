@@ -2633,6 +2633,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       }
 
       const unifiedSummaryByR1Main = new Map<number, UnifiedMainIdSummary>();
+      const s1AutoIdSourceMap = new Map<number, number>();
+      const R1_EXPLICIT_AUTO_IDS = new Set([9, 10, 13, 20, 21, 24, 25]);
+      const R1_EXPLICIT_MANUAL_IDS = new Set([17, 18, 19]);
       if (snap1 && snap1.size > 0) {
         const s1Ids = Array.from(snap1.keys()).sort((a, b) => a - b);
         const s1OwnerPrimary = new Map<string, number>();
@@ -2641,7 +2644,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const s1MatchedRight = new Set<number>();
         const s1CloneCountByMain = new Map<number, number>();
         const s1ExtraCountByMain = new Map<number, number>();
-        const s1AutoIdSourceMap = new Map<number, number>();
         const s1AutoIdCountByMain = new Map<number, number>();
         const s1DirectMap = new Map<number, number>();
         const s1UnilevelMap = new Map<number, number>();
@@ -2773,7 +2775,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const oKey = sn.owner.toLowerCase();
           const firstMain = s1OwnerPrimary.get(oKey) || id1;
 
-          if (!sn.isClone && !sn.isExtraId && id1 > firstMain) {
+          if (!sn.isClone && !sn.isExtraId && id1 > firstMain && !R1_EXPLICIT_MANUAL_IDS.has(id1)) {
             const explicitSpId = sn.directSponsorNodeId || 0;
             // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
             const priorMains = (s1OwnerAllMains.get(oKey) || []).filter((m) => {
@@ -3029,6 +3031,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const hasLeftChild = n.leftChild > 0;
         const vaultBalance = hasLeftChild ? vaultUnit : 0;
 
+        // สถานะรหัสหลัก (MANUAL ID vs AUTO ID) ต้องยึดตามรหัสหลักใน Rank 1 (`r1MainId`) เสมอ ไม่ใช่เลขลำดับโหนดใน Rank 2-27 (`n.id`)
+        const effectiveR1MainId = isExtraOrigin
+          ? 0
+          : r1MainId || (activeRank === 1 ? n.id : originMainId);
+
         enrichedMap.set(n.id, {
           id: n.id,
           rank: activeRank,
@@ -3042,8 +3049,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           isClone: n.isClone,
           isExtraId: n.isExtraId,
           isAutoMainId:
-            (new Set([9, 10, 13, 20, 21, 24, 25]).has(n.id) || autoMainNodeIds.has(n.id)) &&
-            !new Set([17, 18, 19]).has(n.id),
+            !n.isClone &&
+            !n.isExtraId &&
+            effectiveR1MainId > 0 &&
+            (R1_EXPLICIT_AUTO_IDS.has(effectiveR1MainId) ||
+              s1AutoIdSourceMap.has(effectiveR1MainId) ||
+              (activeRank === 1 && autoMainNodeIds.has(n.id))) &&
+            !R1_EXPLICIT_MANUAL_IDS.has(effectiveR1MainId),
           originMainId,
           r1MainId,
           isExtraLineage: isExtraOrigin,

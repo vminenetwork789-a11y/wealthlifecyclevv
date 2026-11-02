@@ -1,5 +1,7 @@
-export const DEFAULT_CONTRACT_ADDRESS = '0x2df74a86Df9D32c735755e1F448a98F4cdA456c5';
-export const DEFAULT_USDT_ADDRESS = '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
+export const DEFAULT_CONTRACT_ADDRESS =
+  import.meta.env?.VITE_CONTRACT_ADDRESS || '0x2df74a86Df9D32c735755e1F448a98F4cdA456c5';
+export const DEFAULT_USDT_ADDRESS =
+  import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
 const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0xc71a9a677d9ef61a9133d6e6545306a11bd3ee5a',
@@ -26,8 +28,9 @@ const LEGACY_USDT_ADDRESSES = new Set([
 
 export const CONTRACT_ADDRESS = DEFAULT_CONTRACT_ADDRESS;
 export const USDT_ADDRESS = DEFAULT_USDT_ADDRESS;
-export const BSC_TESTNET_RPC = 'https://bsc-testnet-rpc.publicnode.com';
-export const BSC_TESTNET_CHAIN_ID = 97;
+export const BSC_TESTNET_RPC =
+  import.meta.env?.VITE_BSC_TESTNET_RPC || 'https://bsc-testnet-rpc.publicnode.com';
+export const BSC_TESTNET_CHAIN_ID = Number(import.meta.env?.VITE_CHAIN_ID || 97);
 export const BSC_TESTNET_CHAIN_ID_HEX = '0x61';
 
 export function getDynamicContractAddress(): string {
