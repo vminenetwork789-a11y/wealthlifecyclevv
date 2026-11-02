@@ -55,10 +55,32 @@ export interface EnrichedBinaryNode {
   // Clone & Lineage Metadata
   originMainId: number; // รหัสหลัก (Primary Main ID of this owner/lineage, e.g. #1, #2, #7)
   spawnedFromNodeId: number; // Exact node whose Right child triggered this clone
-  cloneRound: number; // รอบโคลน (รอบ 1, 2, 3...)
+  cloneRound: number; // รอบโคลน (รอบ 1 = ติดตัวผู้แนะนำ, รอบ 2 = ผังรวม BFS)
+  cloneSequence?: number; // ลำดับใบโคลนของรหัสหลักนี้ (ใบที่ 1, 2, 3...)
   subCloneDepth: number; // #0 if spawned from primary ID, >=1 if spawned from a clone
-  spawnedCloneIds: Array<{ cloneNodeId: number; round: number }>; // Clones spawned by this node
+  spawnedCloneIds: Array<{ cloneNodeId: number; round: number; sequence?: number }>; // Clones spawned by this node
   directUplineNodeId: number; // ผู้แนะนำ (Sponsor's primary node ID, #0 for Root)
+  levelSummary?: {
+    maxLevels: number;
+    receivedLevelsCount: number;
+    remainingLevelsCount: number;
+    ratePerNodeUsdt: number;
+    thisNodeLevelTotalUsdt: number;
+    clonesLevelTotalUsdt: number;
+    combinedLevelTotalUsdt: number;
+    tiersBreakdown: Array<{
+      tier: number;
+      maxCapacity: number;
+      totalNodesInTier: number;
+      leftPayingNodesCount: number;
+      rightRebirthNodesCount: number;
+      ratePerNodeUsdt: number;
+      amountUsdt: number;
+      allNodeIds: number[];
+      leftNodeIds: number[];
+      rightNodeIds: number[];
+    }>;
+  };
   // Per-Node Benefits (ผลประโยชน์เฉพาะผังนี้)
   directRewardThisNode: number; // 30% ค่าแนะนำเฉพาะผังนี้
   unilevelRewardThisNode: number; // ยูนิเลเวล 15 ชั้นเฉพาะผังนี้ (2% ต่อชั้น)
@@ -71,6 +93,8 @@ export interface EnrichedBinaryNode {
   totalClonesCount: number; // จำนวนโคลนนิ่งทั้งหมด
   totalAutoIdCount: number; // จำนวน New Auto ID ทั้งหมด
   totalExtraIdCount: number; // จำนวน New Extra ID ทั้งหมด
+  spawnedAutoIds?: number[]; // รายการรหัส Auto ID ที่แตกตัวจากรหัสหลักนี้ (เช่น [11])
+  spawnedByMainId?: number; // รหัสหลักต้นทางที่สร้าง Auto ID นี้ (เช่น 1)
   vaultBalance: number;
   nextRankPrice: number;
   familyPoolDirectFromLineage?: number; // 30% จากโคลน #1 ลงซ้ายที่ถูกส่งเข้า Family Pool
@@ -763,6 +787,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   const treeContentRef = useRef<HTMLDivElement | null>(null);
   const [connectorLines, setConnectorLines] = useState<ConnectorLine[]>([]);
   const [isCloneStatusPopupOpen, setIsCloneStatusPopupOpen] = useState<boolean>(false);
+  const [isLevelSummaryPopupOpen, setIsLevelSummaryPopupOpen] = useState<boolean>(false);
 
   const getWorkingProvider = useCallback(async (): Promise<ethers.Provider> => {
     if (typeof window !== 'undefined' && window.ethereum && isBscTestnet) {
@@ -853,6 +878,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const onChainNodeVaultMap = new Map<number, number>();
         const onChainSponsorNodeMap = new Map<number, number>();
         const onChainCloneRoundMap = new Map<number, number>();
+        const onChainOriginTypeMap = new Map<number, string>();
 
         let fetchedRankCounts: Record<number, number> = {};
 
@@ -905,6 +931,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   }
                   if (Number(item.cloneRound) > 0) {
                     onChainCloneRoundMap.set(nid, Number(item.cloneRound));
+                  }
+                  if (item.originType) {
+                    onChainOriginTypeMap.set(nid, String(item.originType));
                   }
                   onChainNodeVaultMap.set(nid, Number(item.nodeVault || 0));
                 }
@@ -1067,6 +1096,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         originMainId: number;
         directSponsorNodeId: number;
         nodeVault: number;
+        originType?: string;
       }
 
       const multiRankSnapshots = new Map<number, Map<number, RankNodeSnapshot>>();
@@ -1081,6 +1111,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 originMainId: onChainOriginMap.get(id) || id,
                 directSponsorNodeId: onChainSponsorNodeMap.get(id) || 0,
                 nodeVault: onChainNodeVaultMap.get(id) ?? 0,
+                originType: onChainOriginTypeMap.get(id),
               });
             }
             multiRankSnapshots.set(r, selfSnap);
@@ -1108,6 +1139,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                       originMainId: Number(item.originMainId) > 0 ? Number(item.originMainId) : nid,
                       directSponsorNodeId: Number(item.directSponsorNodeId || 0),
                       nodeVault: Number(item.nodeVault ?? 0),
+                      originType: item.originType ? String(item.originType) : undefined,
                     });
                   }
                 }
@@ -1887,10 +1919,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         return false;
       };
 
-      // Pass 1: Build Clone Lineage (originMainId, spawnedFromNodeId, cloneRound, subCloneDepth) first
+      // Pass 1: Build Clone Lineage (originMainId, spawnedFromNodeId, cloneRound, cloneSequence, subCloneDepth) first
       const originMainIdMap = new Map<number, number>();
       const spawnedFromMap = new Map<number, number>();
       const cloneRoundMap = new Map<number, number>();
+      const cloneSequenceMap = new Map<number, number>();
       const subCloneDepthMap = new Map<number, number>();
       const matchedRightTriggers = new Set<number>();
 
@@ -1912,11 +1945,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           originMainIdMap.set(n.id, n.id);
           spawnedFromMap.set(n.id, 0);
           cloneRoundMap.set(n.id, 0);
+          cloneSequenceMap.set(n.id, 0);
           subCloneDepthMap.set(n.id, 0);
         } else if (n.isClone) {
           const walletFirstId = ownerPrimaryNodeMap.get(ownerKey) || n.id;
           const rawOnChainOrigin = onChainOriginMap.get(n.id) || 0;
-          let onChainOrigin = rawOnChainOrigin;
+          let onChainOrigin =
+            rawOnChainOrigin === n.id || rawNodes.get(rawOnChainOrigin)?.isClone
+              ? 0
+              : rawOnChainOrigin;
           if (activeRank > 1 && rawOnChainOrigin > 1) {
             const ownerMains = ownerAllMainNodesMap.get(ownerKey) || [];
             const matchedLocalMain = ownerMains.find(
@@ -1979,10 +2016,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           originMainIdMap.set(n.id, originMainId);
           spawnedFromMap.set(n.id, spawnedFromNodeId);
           cloneRoundMap.set(n.id, cloneRound);
+          cloneSequenceMap.set(n.id, currentCount);
           subCloneDepthMap.set(n.id, subCloneDepth);
 
           const list = nodeSpawnedClones.get(spawnedFromNodeId) || [];
-          list.push({ cloneNodeId: n.id, round: cloneRound });
+          list.push({ cloneNodeId: n.id, round: cloneRound, sequence: currentCount });
           nodeSpawnedClones.set(spawnedFromNodeId, list);
         } else {
           // Auto Extra ID ทำงานเหมือน Auto ID: เป็นรหัสหลักใหม่ของตัวเอง (originMainId = n.id) โดยมีผู้แนะนำคือรหัสหลักต้นทางที่สร้างมัน
@@ -1992,6 +2030,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           extraIdSourceMainMap.set(n.id, sourceSponsorMainId);
           spawnedFromMap.set(n.id, 0);
           cloneRoundMap.set(n.id, 0);
+          cloneSequenceMap.set(n.id, 0);
           subCloneDepthMap.set(n.id, 0);
         }
       }
@@ -2448,31 +2487,32 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       // Pass 2: Chronological simulation of Auto New Main IDs, Left-Child Direct (30%), Unilevel (15 tiers x 2%), and Vault Pools (35%)
       const rank1EntryPrice = RANK_PRICES_USDT[0] || 5;
       const usedExtraR2To4ForMain = new Set<number>();
+      const nodeSpawnedAutoIds = new Map<number, number[]>();
 
       for (const id of sortedIds) {
         const n = rawNodes.get(id)!;
         const ownerKey = n.owner.toLowerCase();
         const firstMainOfOwner = ownerPrimaryNodeMap.get(ownerKey) || n.id;
 
-        const EXPLICIT_AUTO_IDS = new Set([9, 10, 13, 20, 21, 24, 25]);
-        const EXPLICIT_MANUAL_IDS = new Set([17, 18, 19]);
-
-        // 1. Check if this node was spawned as an Auto New Main ID from Pool 2
-        if (!n.isClone && !n.isExtraId && (EXPLICIT_AUTO_IDS.has(n.id) || Boolean((n as any).isSyntheticAutoMain))) {
+        // 1. Check if this node was spawned as an Auto New Main ID from Pool 2 (Rank 1..3 Vault >= 5 USDT)
+        if (!n.isClone && !n.isExtraId && n.id > firstMainOfOwner) {
           const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
+          const isBackendTaggedAuto =
+            onChainOriginTypeMap.get(n.id) === 'AUTO_NEW_MAIN' ||
+            Boolean((n as any).isSyntheticAutoMain);
           const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter((mId) => {
             if (mId >= n.id) return false;
             if (getMainIdWindow5Start(mId, n.owner) <= 1) return false;
             const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
             const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
-            if (currentSpawns >= maxAllowedSpawns) return false;
+            if (!isBackendTaggedAuto && currentSpawns >= maxAllowedSpawns) return false;
             const mSponsorId = onChainSponsorNodeMap.get(mId) || 0;
             const isSelfSponsored = Boolean(
               n.directSponsor && n.directSponsor.toLowerCase() === ownerKey
             );
             return (
               (isSelfSponsored && (explicitSponsorId === 0 || mId === explicitSponsorId)) ||
-              (explicitSponsorId > 0 && explicitSponsorId === mSponsorId)
+              (explicitSponsorId > 0 && (explicitSponsorId === mId || explicitSponsorId === mSponsorId))
             );
           });
 
@@ -2493,6 +2533,12 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
             }
           }
+          if (sourceMain === undefined && isBackendTaggedAuto) {
+            sourceMain =
+              explicitSponsorId > 0 && priorMains.includes(explicitSponsorId)
+                ? explicitSponsorId
+                : priorMains[0] ?? firstMainOfOwner;
+          }
 
           if (sourceMain !== undefined) {
             autoMainNodeIds.add(n.id);
@@ -2501,6 +2547,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               sourceMain,
               (mainNodeAutoIdSpawnCount.get(sourceMain) || 0) + 1
             );
+            const spawnedList = nodeSpawnedAutoIds.get(sourceMain) || [];
+            if (!spawnedList.includes(n.id)) {
+              spawnedList.push(n.id);
+              nodeSpawnedAutoIds.set(sourceMain, spawnedList);
+            }
             const currentAutoVault = lineageAutoIdVault.get(sourceMain) || 0;
             lineageAutoIdVault.set(
               sourceMain,
@@ -2683,8 +2734,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
       const unifiedSummaryByR1Main = new Map<number, UnifiedMainIdSummary>();
       const s1AutoIdSourceMap = new Map<number, number>();
-      const R1_EXPLICIT_AUTO_IDS = new Set([9, 10, 13, 20, 21, 24, 25]);
-      const R1_EXPLICIT_MANUAL_IDS = new Set([17, 18, 19]);
+      const s1SpawnedAutoIdsByMain = new Map<number, number[]>();
       if (snap1 && snap1.size > 0) {
         const s1Ids = Array.from(snap1.keys()).sort((a, b) => a - b);
         const s1OwnerPrimary = new Map<string, number>();
@@ -2824,20 +2874,21 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const oKey = sn.owner.toLowerCase();
           const firstMain = s1OwnerPrimary.get(oKey) || id1;
 
-          if (!sn.isClone && !sn.isExtraId && id1 > firstMain && !R1_EXPLICIT_MANUAL_IDS.has(id1)) {
+          if (!sn.isClone && !sn.isExtraId && id1 > firstMain) {
             const explicitSpId = sn.directSponsorNodeId || 0;
+            const isSnapTaggedAuto = sn.originType === 'AUTO_NEW_MAIN';
             // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
             const priorMains = (s1OwnerAllMains.get(oKey) || []).filter((m) => {
               if (m >= id1) return false;
               if (getMainIdWindow5Start(m, sn.owner) <= 1) return false;
               const maxAllowed = crossRankAutoIdCount.get(m) || 0;
               const curSpawns = s1AutoIdCountByMain.get(m) || 0;
-              if (curSpawns >= maxAllowed) return false;
+              if (!isSnapTaggedAuto && curSpawns >= maxAllowed) return false;
               const mSpId = snap1.get(m)?.directSponsorNodeId || 0;
               const isSelfSp = Boolean(sn.directSponsor && sn.directSponsor.toLowerCase() === oKey);
               return (
                 (isSelfSp && (explicitSpId === 0 || m === explicitSpId)) ||
-                (explicitSpId > 0 && explicitSpId === mSpId)
+                (explicitSpId > 0 && (explicitSpId === m || explicitSpId === mSpId))
               );
             });
             let sourceMain = priorMains.find(
@@ -2860,9 +2911,20 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 );
               }
             }
+            if (sourceMain === undefined && isSnapTaggedAuto) {
+              sourceMain =
+                explicitSpId > 0 && priorMains.includes(explicitSpId)
+                  ? explicitSpId
+                  : priorMains[0] ?? firstMain;
+            }
             if (sourceMain !== undefined) {
               s1AutoIdSourceMap.set(id1, sourceMain);
               s1AutoIdCountByMain.set(sourceMain, (s1AutoIdCountByMain.get(sourceMain) || 0) + 1);
+              const spList = s1SpawnedAutoIdsByMain.get(sourceMain) || [];
+              if (!spList.includes(id1)) {
+                spList.push(id1);
+                s1SpawnedAutoIdsByMain.set(sourceMain, spList);
+              }
               s1AutoVaultSim.set(
                 sourceMain,
                 Math.max(0, Number(((s1AutoVaultSim.get(sourceMain) || 0) - r1Price).toFixed(4)))
@@ -2949,6 +3011,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const originMainId = originMainIdMap.get(n.id) || n.id;
         const spawnedFromNodeId = spawnedFromMap.get(n.id) || 0;
         const cloneRound = cloneRoundMap.get(n.id) || 0;
+        const cloneSequence = cloneSequenceMap.get(n.id) || 0;
         const subCloneDepth = subCloneDepthMap.get(n.id) || 0;
 
         let depth = 1;
@@ -3100,19 +3163,27 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           isAutoMainId:
             !n.isClone &&
             !n.isExtraId &&
-            effectiveR1MainId > 0 &&
-            (R1_EXPLICIT_AUTO_IDS.has(effectiveR1MainId) ||
-              s1AutoIdSourceMap.has(effectiveR1MainId) ||
-              (activeRank === 1 && autoMainNodeIds.has(n.id))) &&
-            !R1_EXPLICIT_MANUAL_IDS.has(effectiveR1MainId),
+            effectiveR1MainId > 1 &&
+            (s1AutoIdSourceMap.has(effectiveR1MainId) ||
+              (activeRank === 1 && autoMainNodeIds.has(n.id)) ||
+              onChainOriginTypeMap.get(n.id) === 'AUTO_NEW_MAIN'),
           originMainId,
           r1MainId,
           isExtraLineage: isExtraOrigin,
           extraMainLabel,
           spawnedFromNodeId,
           cloneRound,
+          cloneSequence,
           subCloneDepth,
           spawnedCloneIds: nodeSpawnedClones.get(n.id) || [],
+          spawnedAutoIds:
+            s1SpawnedAutoIdsByMain.get(effectiveR1MainId) ||
+            nodeSpawnedAutoIds.get(originMainId) ||
+            [],
+          spawnedByMainId:
+            s1AutoIdSourceMap.get(effectiveR1MainId) ||
+            autoIdSourceMainMap.get(n.id) ||
+            undefined,
           directUplineNodeId,
           directRewardThisNode: nodeDirectBonusMap.get(n.id) || 0,
           unilevelRewardThisNode: nodeUnilevelBonusMap.get(n.id) || 0,
@@ -3145,7 +3216,16 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           node.directRewardAllNodes = unified.directRewardAllNodes;
           node.unilevelRewardAllNodes = unified.unilevelRewardAllNodes;
           node.totalClonesCount = nodeCloneRoundCount.get(node.originMainId) || 0;
-          node.totalAutoIdCount = unified.totalAutoIdCount;
+          const spawnedAutos =
+            s1SpawnedAutoIdsByMain.get(targetMainId) ||
+            nodeSpawnedAutoIds.get(node.originMainId) ||
+            [];
+          node.spawnedAutoIds = spawnedAutos;
+          node.totalAutoIdCount = Math.max(
+            unified.totalAutoIdCount,
+            spawnedAutos.length,
+            crossRankAutoIdCount.get(targetMainId) || 0
+          );
           node.totalExtraIdCount =
             crossRankExtraIdCount.get(targetMainId) ?? unified.totalExtraIdCount;
           node.familyPoolDirectFromLineage = unified.familyPoolDirectFromLineage;
@@ -3168,9 +3248,19 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           node.directRewardAllNodes = Number(sumDirect.toFixed(4));
           node.unilevelRewardAllNodes = Number(sumUnilevel.toFixed(4));
           node.totalClonesCount = nodeCloneRoundCount.get(node.originMainId) || 0;
+          const spawnedAutos = isExtraLineage
+            ? []
+            : s1SpawnedAutoIdsByMain.get(targetMainId) ||
+              nodeSpawnedAutoIds.get(node.originMainId) ||
+              [];
+          node.spawnedAutoIds = spawnedAutos;
           node.totalAutoIdCount = isExtraLineage
             ? 0
-            : mainNodeAutoIdSpawnCount.get(node.originMainId) || 0;
+            : Math.max(
+                mainNodeAutoIdSpawnCount.get(node.originMainId) || 0,
+                spawnedAutos.length,
+                crossRankAutoIdCount.get(targetMainId) || 0
+              );
           node.totalExtraIdCount = isExtraLineage
             ? lineageExtraIdSpawnCount.get(node.originMainId) || 0
             : crossRankExtraIdCount.get(targetMainId) ??
@@ -3232,6 +3322,67 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         node.vault4To27BreakdownText = isExtraLineage
           ? undefined
           : crossRankExtraBreakdownText.get(targetMainId);
+
+        // คำนวณรายละเอียดค่าชั้น 15 ชั้น (รับไปแล้วกี่ชั้น ชั้นละเท่าไร เหลืออีกกี่ชั้น) ของโหนดนี้
+        const tiersBreakdown: NonNullable<EnrichedBinaryNode['levelSummary']>['tiersBreakdown'] = [];
+        let currentFrontier: number[] = [node.id];
+        const visitedSub = new Set<number>([node.id]);
+        const ratePerNode = Number((unitPrice * 0.02).toFixed(2));
+        let thisNodeLvlTotal = 0;
+
+        for (let tier = 1; tier <= 15; tier++) {
+          const nextFrontier: number[] = [];
+          const leftNodeIds: number[] = [];
+          const rightNodeIds: number[] = [];
+          for (const pId of currentFrontier) {
+            const pObj = rawNodes.get(pId);
+            if (!pObj) continue;
+            if (pObj.leftChild > 0 && rawNodes.has(pObj.leftChild) && !visitedSub.has(pObj.leftChild)) {
+              visitedSub.add(pObj.leftChild);
+              nextFrontier.push(pObj.leftChild);
+              leftNodeIds.push(pObj.leftChild);
+            }
+            if (pObj.rightChild > 0 && rawNodes.has(pObj.rightChild) && !visitedSub.has(pObj.rightChild)) {
+              visitedSub.add(pObj.rightChild);
+              nextFrontier.push(pObj.rightChild);
+              rightNodeIds.push(pObj.rightChild);
+            }
+          }
+          if (nextFrontier.length === 0) break;
+          const tierAmt = Number((leftNodeIds.length * ratePerNode).toFixed(2));
+          thisNodeLvlTotal = Number((thisNodeLvlTotal + tierAmt).toFixed(2));
+          tiersBreakdown.push({
+            tier,
+            maxCapacity: Math.pow(2, tier),
+            totalNodesInTier: nextFrontier.length,
+            leftPayingNodesCount: leftNodeIds.length,
+            rightRebirthNodesCount: rightNodeIds.length,
+            ratePerNodeUsdt: ratePerNode,
+            amountUsdt: tierAmt,
+            allNodeIds: nextFrontier,
+            leftNodeIds,
+            rightNodeIds,
+          });
+          currentFrontier = nextFrontier;
+        }
+
+        const receivedLevelsCount = tiersBreakdown.length;
+        const remainingLevelsCount = Math.max(0, 15 - receivedLevelsCount);
+        const clonesLvlTotal = !node.isClone
+          ? Number(Math.max(0, node.unilevelRewardAllNodes - thisNodeLvlTotal).toFixed(2))
+          : 0;
+        node.levelSummary = {
+          maxLevels: 15,
+          receivedLevelsCount,
+          remainingLevelsCount,
+          ratePerNodeUsdt: ratePerNode,
+          thisNodeLevelTotalUsdt: thisNodeLvlTotal,
+          clonesLevelTotalUsdt: clonesLvlTotal,
+          combinedLevelTotalUsdt: !node.isClone
+            ? Number(node.unilevelRewardAllNodes.toFixed(2))
+            : thisNodeLvlTotal,
+          tiersBreakdown,
+        };
       }
 
         // Detect newly arrived node IDs in this rank (e.g. when ID #6+ joins) so we can highlight & auto-extend the tree
@@ -3815,7 +3966,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           {node.isClone ? (
             <div className="absolute -top-2 right-1.5 px-1.5 py-0.2 rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 text-[8.5px] font-black text-slate-950 shadow flex items-center gap-0.5 border border-emerald-200/70">
               <Dna className="w-2.5 h-2.5 text-slate-950" />
-              <span>CLONE ID</span>
+              <span>CLONE ID • รอบ {node.cloneRound || 1}</span>
             </div>
           ) : (
             <div
@@ -3847,8 +3998,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   className="px-1.5 py-0.2 rounded bg-[#0d2324] border border-emerald-500/50 font-mono font-extrabold text-[10px] hover:border-emerald-300 transition cursor-pointer"
                   title={
                     node.isExtraLineage
-                      ? `รหัสหลักอิสระ ${node.extraMainLabel} (โคลนโหนด #${node.id} ใน Rank ${node.rank})`
-                      : `รหัสหลัก #${node.r1MainId || node.originMainId} (โคลนโหนด #${node.id} ใน Rank ${node.rank})`
+                      ? `รหัสหลักอิสระ ${node.extraMainLabel} (โคลนโหนด #${node.id} ใน Rank ${node.rank} • รอบที่ ${node.cloneRound || 1})`
+                      : `รหัสหลัก #${node.r1MainId || node.originMainId} (โคลนโหนด #${node.id} ใน Rank ${node.rank} • รอบที่ ${node.cloneRound || 1})`
                   }
                 >
                   <span className={node.isExtraLineage ? 'text-cyan-300 font-black' : 'text-amber-400 font-black'}>
@@ -3856,8 +4007,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                       ? node.extraMainLabel || `Extra R${node.rank}-#${node.originMainId}`
                       : `Main #${node.r1MainId || node.originMainId}`}
                   </span>{' '}
-                  <span className="text-emerald-300 font-bold">(โคลน R{node.rank}-#{node.id})</span>
+                  <span className="text-emerald-300 font-bold">
+                    (โคลน R{node.rank}-#{node.id})
+                  </span>
                 </button>
+                <span className="px-1 py-0.2 rounded bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 font-mono font-extrabold text-[8.5px]">
+                  รอบ {node.cloneRound || 1}
+                </span>
                 <span className="px-1 py-0.2 rounded bg-amber-500/15 border border-amber-500/40 text-amber-400 font-mono font-bold text-[9.5px]">
                   R{node.rank}
                 </span>
@@ -3884,8 +4040,17 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 >
                   {node.isExtraId ? (
                     <>
-                      <span className="text-cyan-300 font-black">
+                      <span className="text-red-400 font-black">
                         {node.extraMainLabel || `Extra R${node.rank}-#${node.id}`}
+                      </span>{' '}
+                      <span className="text-slate-300 font-semibold">
+                        (R{node.rank}-#{node.id})
+                      </span>
+                    </>
+                  ) : node.isAutoMainId ? (
+                    <>
+                      <span className="text-amber-300 font-black">
+                        Auto ID #{node.r1MainId || node.originMainId}
                       </span>{' '}
                       <span className="text-slate-300 font-semibold">
                         (R{node.rank}-#{node.id})
@@ -3893,7 +4058,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                     </>
                   ) : (
                     <>
-                      <span className="text-amber-400 font-black">
+                      <span className="text-white font-black">
                         Main #{node.r1MainId || node.originMainId}
                       </span>{' '}
                       <span className="text-slate-300 font-semibold">
@@ -3974,19 +4139,29 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
 
             {node.isClone && (
-              <div className="flex items-center justify-between">
-                <span className="text-fuchsia-300 font-bold">รหัสหลัก:</span>
-                <button
-                  type="button"
-                  onClick={() => navigateToNode(node.originMainId)}
-                  className="font-mono font-extrabold text-amber-400 hover:underline cursor-pointer text-[9px]"
-                  title={`คลิกเพื่อไปที่รหัสหลัก ${node.isExtraLineage ? node.extraMainLabel : `#${node.originMainId}`}`}
-                >
-                  {node.isExtraLineage
-                    ? node.extraMainLabel || `Extra R${node.rank}-#${node.originMainId}`
-                    : `#${node.originMainId}`}
-                </button>
-              </div>
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-fuchsia-300 font-bold">รหัสหลัก:</span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToNode(node.originMainId)}
+                    className="font-mono font-extrabold text-amber-400 hover:underline cursor-pointer text-[9px]"
+                    title={`คลิกเพื่อไปที่รหัสหลัก ${node.isExtraLineage ? node.extraMainLabel : `#${node.originMainId}`}`}
+                  >
+                    {node.isExtraLineage
+                      ? node.extraMainLabel || `Extra R${node.rank}-#${node.originMainId}`
+                      : `#${node.originMainId}`}
+                  </button>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-emerald-300 font-bold">รอบโคลนนิ่ง:</span>
+                  <span className="font-mono font-extrabold text-emerald-300 text-[8.5px]">
+                    รอบที่ {node.cloneRound || 1}
+                    {node.cloneSequence ? ` (ใบที่ #${node.cloneSequence})` : ''} •{' '}
+                    {(node.cloneRound || 1) === 2 ? 'ผังรวม BFS' : 'ติดผู้แนะนำ'}
+                  </span>
+                </div>
+              </>
             )}
 
             <div className="flex items-center justify-between">
@@ -4100,9 +4275,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
           </div>
 
-          {/* Vault & Clone Count Pill Bar */}
+          {/* Vault & Auto ID / Clone Count Pill Bar */}
           {!node.isClone && (
-            <div className="mt-1 px-1.5 py-0.5 rounded-md bg-[#0c1020] border border-slate-800/90 flex items-center justify-between gap-0.5 text-[8.5px]">
+            <div className="mt-1 px-1.5 py-0.5 rounded-md bg-[#0c1020] border border-slate-800/90 flex items-center justify-between gap-0.5 flex-wrap text-[8.5px]">
               <span className="text-slate-200 font-mono flex items-center gap-0.5">
                 <Shield className="w-2.5 h-2.5 text-amber-400 shrink-0" />
                 <span>
@@ -4128,32 +4303,123 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   )}
                 </span>
               </span>
-              {(
-                node.isExtraId
-                  ? node.spawnedCloneIds.length > 0
-                  : node.totalClonesCount > 0 || node.spawnedCloneIds.length > 0
-              ) ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    node.spawnedCloneIds[0] &&
-                    navigateToNode(node.spawnedCloneIds[0].cloneNodeId)
-                  }
-                  className="text-amber-400 hover:text-amber-300 font-bold underline flex items-center gap-0.5 cursor-pointer text-[8.5px]"
-                >
-                  <span>
-                    ✨ โคลน{' '}
-                    {node.isExtraId
-                      ? node.spawnedCloneIds.length
-                      : Math.max(node.totalClonesCount, node.spawnedCloneIds.length)}{' '}
-                    ↘
-                  </span>
-                </button>
-              ) : (
-                <span className="text-slate-500 font-medium text-[8px]">ปกติ</span>
-              )}
+              <div className="flex items-center gap-1">
+                {!node.isExtraId && node.totalAutoIdCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const firstAutoId = node.spawnedAutoIds?.[0];
+                      if (firstAutoId) {
+                        navigateToNode(firstAutoId);
+                      } else {
+                        setBenefitModalTab('auto_extra');
+                        setExpandedBenefitNodeId(node.id);
+                      }
+                    }}
+                    className="px-1 py-0.2 rounded bg-amber-500/20 border border-amber-400/60 text-amber-300 hover:bg-amber-500/35 font-extrabold flex items-center gap-0.5 cursor-pointer text-[8px]"
+                    title={
+                      node.spawnedAutoIds && node.spawnedAutoIds.length > 0
+                        ? `คลิกเพื่อไปที่ Auto ID #${node.spawnedAutoIds.join(', #')}`
+                        : `รหัสหลักนี้สร้าง Auto ID แล้ว ${node.totalAutoIdCount} รหัส`
+                    }
+                  >
+                    <span>
+                      🤖 Auto ID {node.totalAutoIdCount}
+                      {node.spawnedAutoIds && node.spawnedAutoIds.length > 0
+                        ? ` (#${node.spawnedAutoIds.join(',#')})`
+                        : ''}
+                    </span>
+                  </button>
+                )}
+                {(
+                  node.isExtraId
+                    ? node.spawnedCloneIds.length > 0
+                    : node.totalClonesCount > 0 || node.spawnedCloneIds.length > 0
+                ) ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      node.spawnedCloneIds[0] &&
+                      navigateToNode(node.spawnedCloneIds[0].cloneNodeId)
+                    }
+                    className="text-emerald-400 hover:text-emerald-300 font-bold underline flex items-center gap-0.5 cursor-pointer text-[8.5px]"
+                    title={
+                      node.spawnedCloneIds.length > 0
+                        ? `โคลนที่เกิดจากโหนดนี้: ${node.spawnedCloneIds
+                            .map((c) => `#${c.cloneNodeId}(รอบ${c.round})`)
+                            .join(', ')}`
+                        : undefined
+                    }
+                  >
+                    <span>
+                      ✨ โคลน{' '}
+                      {node.isExtraId
+                        ? node.spawnedCloneIds.length
+                        : Math.max(node.totalClonesCount, node.spawnedCloneIds.length)}
+                      {node.spawnedCloneIds.length > 0
+                        ? ` (รอบ ${node.spawnedCloneIds.map((c) => c.round).join(',')})`
+                        : ''}{' '}
+                      ↘
+                    </span>
+                  </button>
+                ) : (
+                  node.totalAutoIdCount === 0 && (
+                    <span className="text-slate-500 font-medium text-[8px]">ปกติ</span>
+                  )
+                )}
+              </div>
             </div>
           )}
+
+          {/* 15-Level Commission Breakdown Box (รับไปแล้วกี่ชั้น ชั้นละเท่าไร เหลืออีกกี่ชั้น) */}
+          {(() => {
+            const ls = node.levelSummary;
+            const receivedCount = ls?.receivedLevelsCount ?? 0;
+            const remainingCount = ls?.remainingLevelsCount ?? Math.max(0, 15 - receivedCount);
+            const tiers = ls?.tiersBreakdown || [];
+            const thisNodeTotal = ls?.thisNodeLevelTotalUsdt ?? node.unilevelRewardThisNode ?? 0;
+            const clonesTotal = ls?.clonesLevelTotalUsdt ?? 0;
+
+            return (
+              <div className="mt-1 px-1.5 py-1 rounded-md bg-[#091526] border border-cyan-500/35 space-y-0.5 text-[8px] font-mono">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-cyan-300 font-extrabold">
+                    🪜 ค่าชั้น: รับแล้ว <strong className="text-emerald-300">{receivedCount}</strong>/15 ชั้น
+                  </span>
+                  <span className="text-amber-300 font-bold">
+                    เหลืออีก {remainingCount} ชั้น
+                  </span>
+                </div>
+                {tiers.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-0.5 pt-0.5 border-t border-slate-800/80">
+                    {tiers.slice(0, 4).map((t) => (
+                      <span
+                        key={`card-lvl-${node.id}-${t.tier}`}
+                        className="px-1 py-0.1 rounded bg-cyan-950/80 border border-cyan-500/30 text-cyan-200 text-[7.5px]"
+                        title={`ชั้นที่ ${t.tier}: เม็ดซ้าย ${t.leftPayingNodesCount} รหัส (${
+                          t.leftNodeIds.length > 0 ? '#' + t.leftNodeIds.join(', #') : '-'
+                        }) × ${t.ratePerNodeUsdt.toFixed(2)}U = +${t.amountUsdt.toFixed(2)} USDT`}
+                      >
+                        ช.{t.tier}:{' '}
+                        <strong className="text-emerald-300">+{t.amountUsdt.toFixed(2)}U</strong>
+                      </span>
+                    ))}
+                    {tiers.length > 4 && (
+                      <span className="text-slate-400 text-[7.5px]">+{tiers.length - 4}ชั้น</span>
+                    )}
+                    <span className="ml-auto text-emerald-300 font-extrabold text-[7.5px]">
+                      รวม +{thisNodeTotal.toFixed(2)}U
+                      {clonesTotal > 0 ? ` (+โคลน ${clonesTotal.toFixed(2)}U)` : ''}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-slate-500 text-[7.5px]">
+                    ยังไม่มีชั้นใต้โหนดนี้ (ชั้นละ {( (RANK_PRICES_USDT[node.rank - 1] || 5) * 0.02 ).toFixed(2)}U/เม็ดซ้าย)
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Open Benefit & History Popup Modal Button */}
           <button
@@ -4227,6 +4493,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
   const allClonesInRank = useMemo(() => {
     return Array.from(activeNodesMap.values()).filter((n) => n.isClone);
+  }, [activeNodesMap]);
+
+  const allAutoIdsInRank = useMemo(() => {
+    return Array.from(activeNodesMap.values()).filter((n) => n.isAutoMainId);
   }, [activeNodesMap]);
 
   if (!hasInitialTreeLoaded) {
@@ -4895,7 +5165,36 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         </div>
       </div>
 
-      {/* 3. Clone Lineage Summary Trigger Bar & Popup Modal */}
+      {/* 3. Clone Lineage & Auto ID Summary Trigger Bars */}
+      {allAutoIdsInRank.length > 0 && (
+        <div className="rounded-2xl bg-amber-950/35 border border-amber-400/50 px-3.5 py-2.5 flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 text-left text-xs font-bold text-amber-200 flex-wrap">
+            <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              🟡 สรุปยอดรหัส Auto ID ใน Rank {selectedRank}: พบ{' '}
+              <span className="text-amber-300 font-mono font-extrabold underline decoration-amber-400/70">
+                {allAutoIdsInRank.length} รหัส Auto ID
+              </span>
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {allAutoIdsInRank.map((autoNode) => (
+              <button
+                key={`jump-auto-${autoNode.id}`}
+                type="button"
+                onClick={() => navigateToNode(autoNode.id)}
+                className="px-2.5 py-1 rounded-xl bg-amber-500/25 hover:bg-amber-500/40 text-amber-200 font-mono font-extrabold text-[11px] border border-amber-400/60 flex items-center gap-1 transition cursor-pointer shadow-sm"
+              >
+                <span>
+                  🟡 Auto ID #{autoNode.r1MainId || autoNode.originMainId} (โหนด #{autoNode.id} • จาก Main #
+                  {autoNode.spawnedByMainId || autoNode.directUplineNodeId || 1})
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {allClonesInRank.length > 0 && (
         <>
           <div className="rounded-2xl bg-emerald-950/30 border border-emerald-500/35 px-3.5 py-2.5 flex items-center justify-between flex-wrap gap-2">
@@ -4909,18 +5208,36 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 สรุปสถานะรหัสโคลนนิ่ง (Rebirth Clone Status) ใน Rank {selectedRank}: พบ{' '}
                 <span className="text-amber-300 font-mono underline decoration-emerald-400/60">
                   {allClonesInRank.length} รหัสโคลน
+                </span>{' '}
+                <span className="text-emerald-200 font-mono text-[11px]">
+                  ({allClonesInRank
+                    .map(
+                      (c) =>
+                        `#${c.id}=Main#${c.r1MainId || c.originMainId}(รอบ ${c.cloneRound || 1})`
+                    )
+                    .join(' • ')})
                 </span>
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsCloneStatusPopupOpen(true)}
-              className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-100 font-semibold text-xs border border-emerald-500/50 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
-            >
-              <Eye className="w-3.5 h-3.5 text-emerald-300" />
-              <span>ดูรายการโคลน ({allClonesInRank.length})</span>
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setIsLevelSummaryPopupOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-100 font-semibold text-xs border border-cyan-500/50 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+              >
+                <Coins className="w-3.5 h-3.5 text-cyan-300" />
+                <span>🪜 ดูค่าชั้นแต่ละไอดี (15 ชั้น)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsCloneStatusPopupOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-100 font-semibold text-xs border border-emerald-500/50 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+              >
+                <Eye className="w-3.5 h-3.5 text-emerald-300" />
+                <span>ดูรายการโคลน ({allClonesInRank.length})</span>
+              </button>
+            </div>
           </div>
 
           {isCloneStatusPopupOpen && (
@@ -4937,7 +5254,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-emerald-300">
                     <Dna className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span>
-                      สรุปสถานะรหัสโคลนนิ่ง (Rebirth Clone Status) ใน Rank {selectedRank}: พบ{' '}
+                      สรุปสถานะรหัสโคลนนิ่ง & รอบโคลน (Rebirth Clone Status) ใน Rank {selectedRank}: พบ{' '}
                       {allClonesInRank.length} รหัสโคลน
                     </span>
                   </div>
@@ -4962,8 +5279,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                           <div className="font-mono font-bold text-emerald-300 flex items-center gap-1.5 flex-wrap">
                             <span className="text-amber-400">Main #{cloneNode.r1MainId || cloneNode.originMainId}</span>
                             <span className="text-emerald-200">(โคลน R{cloneNode.rank || selectedRank}-#{cloneNode.id})</span>
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-200 text-[10px]">
-                              รอบ {cloneNode.cloneRound}
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/25 border border-emerald-400/50 text-emerald-200 text-[10px]">
+                              รอบที่ {cloneNode.cloneRound || 1}
+                              {cloneNode.cloneSequence ? ` (ใบที่ #${cloneNode.cloneSequence})` : ''}
                             </span>
                           </div>
                           <div className="text-[11px] text-slate-300">
@@ -4971,7 +5289,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             <span className="font-mono font-bold text-amber-300">
                               #{cloneNode.originMainId}
                             </span>{' '}
-                            • อัพไลน์ #{cloneNode.parentId} ({cloneNode.isLeft ? 'ซ้าย' : 'ขวา'})
+                            • อัพไลน์ #{cloneNode.parentId} ({cloneNode.isLeft ? 'ซ้าย' : 'ขวา'}) •{' '}
+                            <span className="text-cyan-300 font-semibold">
+                              {(cloneNode.cloneRound || 1) === 2 ? 'ลงผังรวม BFS' : 'ติดตัวผู้แนะนำ'}
+                            </span>
                           </div>
                         </div>
 
@@ -5016,6 +5337,135 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
           )}
         </>
+      )}
+
+      {/* Popup Modal: สรุปค่าชั้น 15 ชั้นของแต่ละไอดี (รับไปแล้วกี่ชั้น • ชั้นละเท่าไร • เหลืออีกกี่ชั้น) */}
+      {isLevelSummaryPopupOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 sm:p-5"
+          onClick={() => setIsLevelSummaryPopupOpen(false)}
+        >
+          <div
+            className="w-full max-w-4xl rounded-2xl bg-slate-950 border-2 border-cyan-500/50 shadow-2xl overflow-hidden flex flex-col max-h-[88vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3.5 bg-cyan-950/60 border-b border-cyan-500/35 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs sm:text-sm font-extrabold text-cyan-300">
+                <Coins className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span>
+                  🪜 สรุปค่าชั้น 15 ชั้น (2% ต่อชั้น = 30%) ของแต่ละไอดีใน Rank {selectedRank} (รับแล้วกี่ชั้น • ชั้นละเท่าไร • เหลืออีกกี่ชั้น)
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLevelSummaryPopupOpen(false)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 text-xs font-semibold cursor-pointer shrink-0"
+              >
+                ✕ ปิดหน้าต่าง
+              </button>
+            </div>
+
+            <div className="p-3.5 sm:p-4 overflow-y-auto space-y-2.5 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {Array.from(activeNodesMap.values())
+                  .sort((a, b) => a.id - b.id)
+                  .map((nItem) => {
+                    const ls = nItem.levelSummary;
+                    const received = ls?.receivedLevelsCount ?? 0;
+                    const remaining = ls?.remainingLevelsCount ?? Math.max(0, 15 - received);
+                    const tiers = ls?.tiersBreakdown || [];
+                    const thisTotal = ls?.thisNodeLevelTotalUsdt ?? nItem.unilevelRewardThisNode ?? 0;
+                    const clonesTotal = ls?.clonesLevelTotalUsdt ?? 0;
+
+                    return (
+                      <div
+                        key={`lvl-summary-card-${nItem.id}`}
+                        className="bg-slate-900/90 border border-cyan-500/35 rounded-xl p-3 space-y-2 font-mono"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-800 pb-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-extrabold text-amber-300 text-xs">
+                              {nItem.isClone
+                                ? `Main #${nItem.r1MainId || nItem.originMainId} (โคลน R${nItem.rank}-#${nItem.id} • รอบ ${nItem.cloneRound || 1})`
+                                : nItem.isAutoMainId
+                                ? `Auto ID #${nItem.r1MainId || nItem.id} (R${nItem.rank}-#${nItem.id})`
+                                : nItem.isExtraId
+                                ? `${nItem.extraMainLabel || `Extra R${nItem.rank}-#${nItem.id}`}`
+                                : `Main ID #${nItem.r1MainId || nItem.id} (R${nItem.rank}-#${nItem.id})`}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigateToNode(nItem.id);
+                              setIsLevelSummaryPopupOpen(false);
+                            }}
+                            className="px-2 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-200 border border-cyan-500/40 text-[10px] cursor-pointer"
+                          >
+                            ไปที่ #{nItem.id}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-slate-300">
+                            รับไปแล้ว:{' '}
+                            <strong className="text-emerald-400">{received} ชั้น</strong> / 15 ชั้น
+                          </span>
+                          <span className="text-amber-300 font-bold">
+                            เหลืออีก: <strong>{remaining} ชั้น</strong>
+                          </span>
+                        </div>
+
+                        {tiers.length > 0 ? (
+                          <div className="space-y-1 bg-slate-950/80 rounded-lg p-2 border border-slate-800 text-[10.5px]">
+                            {tiers.map((t) => (
+                              <div
+                                key={`lvl-pop-${nItem.id}-${t.tier}`}
+                                className="flex items-center justify-between gap-2"
+                              >
+                                <span className="text-slate-300">
+                                  • <strong className="text-cyan-300">ชั้นที่ {t.tier}</strong>: เม็ดซ้าย{' '}
+                                  <strong className="text-white">{t.leftPayingNodesCount}</strong> รหัส
+                                  {t.leftNodeIds.length > 0 ? ` (#${t.leftNodeIds.join(', #')})` : ''}
+                                  {t.rightRebirthNodesCount > 0
+                                    ? ` | ขวา ${t.rightRebirthNodesCount} (#${t.rightNodeIds.join(', #')})`
+                                    : ''}
+                                </span>
+                                <span className="text-emerald-400 font-extrabold shrink-0">
+                                  +{t.amountUsdt.toFixed(2)} USDT
+                                </span>
+                              </div>
+                            ))}
+                            <div className="pt-1 border-t border-slate-800 flex items-center justify-between text-[11px]">
+                              <span className="text-slate-400">รวมค่าชั้นเฉพาะโหนด #{nItem.id}:</span>
+                              <span className="text-cyan-300 font-extrabold">
+                                +{thisTotal.toFixed(2)} USDT
+                                {clonesTotal > 0 ? ` (+ผ่านโคลน ${clonesTotal.toFixed(2)}U)` : ''}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-[10.5px] text-slate-500 bg-slate-950/60 rounded-lg p-2 border border-slate-800/80">
+                            ยังไม่มีลูกข่ายใต้โหนดนี้ (รับไปแล้ว 0 ชั้น • เหลืออีก 15 ชั้น)
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            <div className="px-4 py-2.5 bg-slate-900/80 border-t border-slate-800 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setIsLevelSummaryPopupOpen(false)}
+                className="px-4 py-1.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-200 border border-cyan-500/40 font-semibold text-xs cursor-pointer"
+              >
+                ปิดหน้าต่าง
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 3b. Rank 2-27 Single-Node On-Chain Info Strip */}
@@ -5337,7 +5787,20 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const directHistory: any[] = mainReport?.direct30History || [];
         const levelHistory: any[] = mainReport?.level30History || [];
         const vaultHistory: any[] = mainReport?.vault35History || [];
-        const autoIdsList: any[] = mainReport?.autoIdsSpawned || [];
+        const fallbackAutoIds = (modalNode.spawnedAutoIds || []).map((aid) => {
+          const an = activeNodesMap.get(aid);
+          return {
+            id: aid,
+            rank: 1,
+            parentId: an?.parentId || 0,
+            side: an ? (an.isLeft ? 'ซ้าย' : 'ขวา') : 'ขวา',
+            label: `Auto ID #${aid} (R1-#${aid})`,
+          };
+        });
+        const autoIdsList: any[] =
+          mainReport?.autoIdsSpawned && mainReport.autoIdsSpawned.length > 0
+            ? mainReport.autoIdsSpawned
+            : fallbackAutoIds;
         const extraIdsList: any[] = mainReport?.autoExtraIdsSpawned || [];
         const clonesList: any[] = mainReport?.clonesSpawned || [];
         const rankNodesList: any[] = mainReport?.rankNodesList || [];
@@ -5569,7 +6032,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         📍 ผลประโยชน์เฉพาะโหนดนี้ (R{modalNode.rank}-#{modalNode.id})
                       </span>
                       <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono font-bold">
-                        {modalNode.isClone ? 'Clone Node' : 'Main Node'}
+                        {modalNode.isClone
+                          ? `Clone Node • รอบที่ ${modalNode.cloneRound || 1}${
+                              modalNode.cloneSequence ? ` (ใบที่ #${modalNode.cloneSequence})` : ''
+                            }`
+                          : 'Main Node'}
                       </span>
                     </div>
                     <div className="space-y-1.5 font-mono text-xs">
@@ -5591,6 +6058,51 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                           +{modalNode.vaultBalance.toFixed(2)} USDT
                         </span>
                       </div>
+
+                      {/* 15-Level Breakdown inside Box 1 */}
+                      {(() => {
+                        const ls = modalNode.levelSummary || idReport?.levelSummary;
+                        const received = ls?.receivedLevelsCount ?? 0;
+                        const remaining = ls?.remainingLevelsCount ?? Math.max(0, 15 - received);
+                        const tiers = ls?.tiersBreakdown || [];
+                        return (
+                          <div className="mt-2 pt-2 border-t border-cyan-500/30 space-y-1.5 text-[11px]">
+                            <div className="flex items-center justify-between">
+                              <span className="text-cyan-300 font-extrabold">
+                                🪜 ค่าชั้นโหนดนี้: รับไปแล้ว {received}/15 ชั้น
+                              </span>
+                              <span className="text-amber-300 font-bold">
+                                เหลืออีก {remaining} ชั้น
+                              </span>
+                            </div>
+                            {tiers.length > 0 ? (
+                              <div className="space-y-1 bg-slate-950/80 p-2 rounded-lg border border-cyan-500/25">
+                                {tiers.map((t: any) => (
+                                  <div
+                                    key={`modal-box1-tier-${t.tier}`}
+                                    className="flex items-center justify-between gap-2 text-[10.5px]"
+                                  >
+                                    <span className="text-slate-300">
+                                      • <strong className="text-cyan-300">ชั้นที่ {t.tier}</strong>: ซ้าย{' '}
+                                      <strong className="text-white">{t.leftPayingNodesCount}</strong> รหัส
+                                      {t.leftNodeIds && t.leftNodeIds.length > 0
+                                        ? ` (#${t.leftNodeIds.join(', #')})`
+                                        : ''}
+                                    </span>
+                                    <span className="text-emerald-400 font-extrabold">
+                                      +{Number(t.amountUsdt || 0).toFixed(2)} USDT
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="text-slate-500 text-[10.5px]">
+                                ยังไม่มีชั้นที่รับค่าชั้นใต้โหนดนี้ (เหลืออีก 15 ชั้น)
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -5632,14 +6144,20 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         </div>
                         <div className="bg-slate-950/90 border border-yellow-500/30 rounded p-1.5 text-center">
                           <span className="text-slate-400 block">Auto ID Pool</span>
-                          <span className="text-yellow-400 font-extrabold text-xs">
+                          <span className="text-yellow-400 font-extrabold text-xs block">
                             {modalNode.newAutoIdPool.toFixed(2)} U
+                          </span>
+                          <span className="text-amber-300 font-bold text-[9.5px] block">
+                            ออกแล้ว: {Math.max(modalNode.totalAutoIdCount, autoIdsList.length)} รหัส
                           </span>
                         </div>
                         <div className="bg-slate-950/90 border border-rose-500/30 rounded p-1.5 text-center">
                           <span className="text-slate-400 block">Extra ID Pool</span>
-                          <span className="text-rose-400 font-extrabold text-xs">
+                          <span className="text-rose-400 font-extrabold text-xs block">
                             {modalNode.newExtraIdPool.toFixed(2)} U
+                          </span>
+                          <span className="text-rose-300 font-bold text-[9.5px] block">
+                            ออกแล้ว: {Math.max(modalNode.totalExtraIdCount, extraIdsList.length)} รหัส
                           </span>
                         </div>
                       </div>
@@ -5799,15 +6317,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                       <div className="text-slate-500 text-[11px]">ยังไม่มีโคลนที่แตกตัวจากรหัสนี้</div>
                     ) : (
                       <div className="space-y-1 max-h-40 overflow-y-auto font-mono text-[11px]">
-                        {clonesList.map((cl: any) => (
+                        {clonesList.map((cl: any, cIdx: number) => (
                           <div
                             key={`modal-clone-${cl.rank}-${cl.id}`}
-                            className="bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 flex items-center justify-between"
+                            className="bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 flex items-center justify-between gap-1"
                           >
                             <span className="text-cyan-300 font-bold">
-                              โคลน R{cl.rank}-#{cl.id} (รอบ {cl.cloneRound})
+                              โคลน R{cl.rank}-#{cl.id} (รอบที่ {cl.cloneRound || 1} • ใบที่ #{cl.cloneSequence || cIdx + 1})
                             </span>
-                            <span className="text-slate-400">
+                            <span className="text-slate-400 shrink-0">
                               ใต้ R{cl.rank}-#{cl.parentId} ({cl.side})
                             </span>
                           </div>
@@ -6013,6 +6531,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         );
 
         const mainAndAutoReports = walletReports.filter((rep: any) => !rep.isClone);
+        const autoIdReports = walletReports.filter((rep: any) => Boolean(rep.isAutoId) && !rep.isClone);
+        const manualMainReports = walletReports.filter((rep: any) => !rep.isClone && !rep.isAutoId);
         const cloneReports = walletReports.filter((rep: any) => Boolean(rep.isClone));
 
         const totalDirect30 = mainAndAutoReports.reduce(
@@ -6048,7 +6568,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                       👛 ข้อมูล ID ทั้งหมดของกระเป๋านี้
                     </h3>
                     <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold text-[11px]">
-                      ถือครอง {walletReports.length} ID ({mainAndAutoReports.length} รหัสหลัก • {cloneReports.length} โคลน)
+                      ถือครอง {walletReports.length} ID ({manualMainReports.length} Main ID • {autoIdReports.length} Auto ID • {cloneReports.length} โคลน)
                     </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2 flex-wrap">
@@ -6195,7 +6715,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                                 {rep.label || `ID #${rep.id}`}
                               </span>
                               <span className={`px-2 py-0.5 rounded-full border font-mono font-bold text-[10px] ${badgeClass}`}>
-                                {rep.typeBadge}
+                                {rep.isClone
+                                  ? `${rep.typeBadge} • รอบที่ ${rep.cloneRound || 1}${
+                                      rep.cloneSequence ? ` (ใบที่ #${rep.cloneSequence})` : ''
+                                    }`
+                                  : rep.typeBadge}
                               </span>
                             </div>
                             <span className="px-2 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono font-bold text-[11px]">
@@ -6234,24 +6758,82 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             </div>
                           </div>
 
+                          {/* 15-Level Breakdown per ID inside Wallet IDs Modal */}
+                          {(() => {
+                            const ls = rep.levelSummary || nodeInActiveRank?.levelSummary;
+                            const received = ls?.receivedLevelsCount ?? 0;
+                            const remaining = ls?.remainingLevelsCount ?? Math.max(0, 15 - received);
+                            const tiers = ls?.tiersBreakdown || [];
+                            const thisTotal = ls?.thisNodeLevelTotalUsdt ?? 0;
+                            const clonesTotal = ls?.clonesLevelTotalUsdt ?? 0;
+
+                            return (
+                              <div className="bg-slate-900/80 border border-cyan-500/30 rounded-lg p-2 space-y-1 font-mono text-[10px]">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-cyan-300 font-bold">
+                                    🪜 ค่าชั้น 15 ชั้น: รับไปแล้ว{' '}
+                                    <strong className="text-emerald-300">{received} ชั้น</strong>
+                                  </span>
+                                  <span className="text-amber-300 font-bold">
+                                    เหลืออีก {remaining} ชั้น
+                                  </span>
+                                </div>
+                                {tiers.length > 0 ? (
+                                  <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800">
+                                    {tiers.map((t: any) => (
+                                      <span
+                                        key={`wallet-lvl-${rep.id}-${t.tier}`}
+                                        className="px-1.5 py-0.5 rounded bg-slate-950 border border-cyan-500/30 text-slate-200"
+                                      >
+                                        ชั้น {t.tier}:{' '}
+                                        <strong className="text-emerald-400">
+                                          +{Number(t.amountUsdt || 0).toFixed(2)}U
+                                        </strong>{' '}
+                                        ({t.leftPayingNodesCount} รหัส
+                                        {t.leftNodeIds && t.leftNodeIds.length > 0
+                                          ? ` #${t.leftNodeIds.join(',#')}`
+                                          : ''}
+                                        )
+                                      </span>
+                                    ))}
+                                    <span className="ml-auto text-cyan-300 font-bold">
+                                      โหนดนี้ +{thisTotal.toFixed(2)}U
+                                      {clonesTotal > 0 ? ` (+โคลน ${clonesTotal.toFixed(2)}U)` : ''}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div className="text-slate-500">
+                                    ยังไม่มีชั้นที่รับค่าชั้นใต้โหนดนี้ (เหลืออีก 15 ชั้น)
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+
                           {!rep.isClone && (
                             <div className="grid grid-cols-3 gap-1.5 font-mono text-[10px]">
                               <div className="bg-slate-900/60 border border-amber-500/25 rounded-lg p-1 text-center">
                                 <span className="text-slate-400 block">Upgrade Pool</span>
                                 <span className="text-amber-300 font-bold">
-                                  {Number(rep.upgradeRankPool || 0).toFixed(2)} U
+                                  {Number(rep.upgradeRankPool ?? nodeInActiveRank?.upgradeRankPool ?? 0).toFixed(2)} U
                                 </span>
                               </div>
                               <div className="bg-slate-900/60 border border-yellow-500/25 rounded-lg p-1 text-center">
                                 <span className="text-slate-400 block">Auto ID</span>
                                 <span className="text-yellow-300 font-bold">
-                                  {(rep.autoIdsSpawned || []).length} รหัส
+                                  {Math.max(
+                                    (rep.autoIdsSpawned || []).length,
+                                    Number(rep.totalAutoIdCount || 0),
+                                    nodeInActiveRank?.totalAutoIdCount || 0
+                                  )}{' '}
+                                  รหัส ({Number(rep.newAutoIdPool ?? nodeInActiveRank?.newAutoIdPool ?? 0).toFixed(2)} U)
                                 </span>
                               </div>
                               <div className="bg-slate-900/60 border border-rose-500/25 rounded-lg p-1 text-center">
                                 <span className="text-slate-400 block">Extra / โคลน</span>
                                 <span className="text-rose-300 font-bold">
-                                  {(rep.autoExtraIdsSpawned || []).length} / {(rep.clonesSpawned || []).length}
+                                  {Math.max((rep.autoExtraIdsSpawned || []).length, Number(rep.totalExtraIdCount || 0))} /{' '}
+                                  {Math.max((rep.clonesSpawned || []).length, Number(rep.totalClonesCount || 0))}
                                 </span>
                               </div>
                             </div>

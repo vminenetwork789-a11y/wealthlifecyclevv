@@ -322,6 +322,7 @@ export interface IndexedTreeNode {
   isSyntheticExtra?: boolean;
   originMainId: number;
   cloneRound: number;
+  cloneSequence?: number;
   directSponsorNodeId: number;
   nodeVault: number;
   rawNodeVault: number;
@@ -996,18 +997,31 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
   if (!Array.isArray(nodes) || nodes.length === 0) return [];
   nodes.sort((a, b) => a.id - b.id);
   const byId = new Map<number, IndexedTreeNode>();
+  const ownerFirstMain = new Map<string, number>();
   for (const n of nodes) {
     byId.set(n.id, n);
+    const ok = (n.owner || '').toLowerCase();
+    if (!n.isClone && !n.isExtraId && !ownerFirstMain.has(ok)) {
+      ownerFirstMain.set(ok, n.id);
+    }
   }
   const cloneCountByOrigin = new Map<number, number>();
   for (const n of nodes) {
     if (n.isClone) {
       n.isExtraId = false;
-      const origId = n.originMainId > 0 ? n.originMainId : n.id;
+      const ok = (n.owner || '').toLowerCase();
+      const fallbackMain = ownerFirstMain.get(ok) || 1;
+      const candidateOrig = byId.get(n.originMainId);
+      if (!n.originMainId || n.originMainId === n.id || !candidateOrig || candidateOrig.isClone) {
+        n.originMainId = fallbackMain;
+      }
+      const origId = n.originMainId > 0 ? n.originMainId : fallbackMain;
       const nextCount = (cloneCountByOrigin.get(origId) || 0) + 1;
       cloneCountByOrigin.set(origId, nextCount);
+      n.cloneSequence = nextCount;
       n.cloneRound = ((nextCount - 1) % 2) + 1;
     } else {
+      n.cloneSequence = 0;
       n.cloneRound = 0;
     }
     if (n.id <= 1 || n.parentId <= 0) continue;
@@ -1446,6 +1460,219 @@ function findClonePlacementInRankNodes(
   };
 }
 
+function reconcileRank1AutoMainIds(): Map<number, number> {
+  const autoMainSourceMap = new Map<number, number>();
+  const r1Nodes = matrixDB.nodesByRank[1] || [];
+  if (r1Nodes.length === 0) return autoMainSourceMap;
+
+  // Ensure every clone in Ranks 1..27 has a valid non-clone originMainId, cloneSequence, and cloneRound
+  for (let r = 1; r <= 27; r++) {
+    const rList = matrixDB.nodesByRank[r] || [];
+    if (rList.length === 0) continue;
+    const sortedR = [...rList].sort((a, b) => a.id - b.id);
+    const byIdR = new Map<number, IndexedTreeNode>();
+    const ownerFirstMainR = new Map<string, number>();
+    for (const rn of sortedR) {
+      byIdR.set(rn.id, rn);
+      const ok = (rn.owner || '').toLowerCase();
+      if (!rn.isClone && !rn.isExtraId && !ownerFirstMainR.has(ok)) {
+        ownerFirstMainR.set(ok, rn.id);
+      }
+    }
+    const cloneCountByOriginR = new Map<number, number>();
+    for (const rn of sortedR) {
+      if (rn.isClone) {
+        const ok = (rn.owner || '').toLowerCase();
+        const fallbackMain = ownerFirstMainR.get(ok) || 1;
+        const origNode = byIdR.get(rn.originMainId);
+        if (!rn.originMainId || rn.originMainId === rn.id || !origNode || origNode.isClone) {
+          rn.originMainId = fallbackMain;
+        }
+        const origId = rn.originMainId > 0 ? rn.originMainId : fallbackMain;
+        const nextCount = (cloneCountByOriginR.get(origId) || 0) + 1;
+        cloneCountByOriginR.set(origId, nextCount);
+        rn.cloneSequence = nextCount;
+        rn.cloneRound = ((nextCount - 1) % 2) + 1;
+      } else {
+        rn.cloneSequence = 0;
+        rn.cloneRound = 0;
+      }
+    }
+  }
+
+  const sortedR1 = [...r1Nodes].sort((a, b) => a.id - b.id);
+  const byIdR1 = new Map<number, IndexedTreeNode>();
+  for (const n of sortedR1) {
+    byIdR1.set(n.id, n);
+    if (n.isClone) {
+      n.originType = 'CLONE';
+    } else if (n.isExtraId) {
+      n.originType = 'AUTO_EXTRA';
+    } else {
+      n.originType = 'MANUAL_REGISTER';
+    }
+  }
+
+  const getMainCurrentRank = (r1MainId: number): number => {
+    if (r1MainId === 1) return 27;
+    let cur = 1;
+    for (let r = 27; r >= 2; r--) {
+      const rList = matrixDB.nodesByRank[r] || [];
+      if (rList.some((x) => !x.isClone && !x.isExtraId && x.originMainId === r1MainId)) {
+        cur = r;
+        break;
+      }
+    }
+    return cur;
+  };
+
+  const getMainWindow5Start = (r1MainId: number): number => {
+    return Math.max(1, getMainCurrentRank(r1MainId) - 4);
+  };
+
+  // Compute expected Auto ID spawns and extra Rank 2..3 Pool 2 vaults per Rank 1 Main ID
+  const expectedAutoSpawnsByMain = new Map<number, number>();
+  const extraR2To3VaultByMain = new Map<number, number>();
+  const usedExtraR2To3 = new Set<number>();
+
+  for (const mNode of sortedR1) {
+    if (mNode.isClone || mNode.isExtraId) continue;
+    const win5Start = getMainWindow5Start(mNode.id);
+    if (win5Start <= 1) {
+      expectedAutoSpawnsByMain.set(mNode.id, 0);
+      extraR2To3VaultByMain.set(mNode.id, 0);
+      continue;
+    }
+
+    let totalGross1To3 = 0;
+    let totalRem1To3 = 0;
+    let extraR2To3 = 0;
+
+    for (let r = 1; r <= 3; r++) {
+      if (r >= win5Start) continue;
+      const rList = matrixDB.nodesByRank[r] || [];
+      const correspMain =
+        r === 1
+          ? mNode
+          : rList.find((x) => !x.isClone && !x.isExtraId && x.originMainId === mNode.id);
+      if (!correspMain) continue;
+
+      const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 5) * 0.35).toFixed(4));
+      let leftCount = 0;
+      for (const sn of rList) {
+        const snOrig = sn.originMainId || sn.id;
+        const isSameMain =
+          sn.id === correspMain.id ||
+          (sn.isClone && (snOrig === correspMain.id || snOrig === mNode.id));
+        if (isSameMain && sn.leftChild > 0) {
+          const lc = rList.find((x) => x.id === sn.leftChild);
+          if (!lc || !lc.isExtraId) {
+            leftCount++;
+          }
+        }
+      }
+
+      const grossR = Number((leftCount * rUnitVault).toFixed(4));
+      const remR = Number((correspMain.nodeVault ?? 0).toFixed(4));
+      totalGross1To3 = Number((totalGross1To3 + grossR).toFixed(4));
+      totalRem1To3 = Number((totalRem1To3 + remR).toFixed(4));
+      if (r > 1) {
+        extraR2To3 = Number((extraR2To3 + grossR).toFixed(4));
+      }
+    }
+
+    const deducted = Math.max(0, Number((totalGross1To3 - totalRem1To3).toFixed(4)));
+    const expectedSpawns = Math.floor((deducted + 1e-4) / 5);
+    expectedAutoSpawnsByMain.set(mNode.id, expectedSpawns);
+    extraR2To3VaultByMain.set(mNode.id, extraR2To3);
+  }
+
+  const ownerPrimaryMap = new Map<string, number>();
+  const ownerAllMainsMap = new Map<string, number[]>();
+  const simAutoVaultByMain = new Map<number, number>();
+  const spawnedCountByMain = new Map<number, number>();
+  const r1EntryPrice = RANK_PRICES_USDT[0] || 5;
+
+  for (const n of sortedR1) {
+    const oKey = (n.owner || '').toLowerCase();
+    if (!n.isClone && !n.isExtraId) {
+      if (!ownerPrimaryMap.has(oKey)) {
+        ownerPrimaryMap.set(oKey, n.id);
+      }
+      const firstMain = ownerPrimaryMap.get(oKey) || n.id;
+
+      if (n.id > firstMain) {
+        const explicitSpId = n.directSponsorNodeId || 0;
+        const priorMains = (ownerAllMainsMap.get(oKey) || []).filter((mId) => {
+          if (mId >= n.id) return false;
+          if (getMainWindow5Start(mId) <= 1) return false;
+          const maxSpawns = expectedAutoSpawnsByMain.get(mId) || 0;
+          const curSpawns = spawnedCountByMain.get(mId) || 0;
+          if (curSpawns >= maxSpawns) return false;
+          const mSpId = byIdR1.get(mId)?.directSponsorNodeId || 0;
+          const isSelfSp = Boolean(n.directSponsor && n.directSponsor.toLowerCase() === oKey);
+          return (
+            (isSelfSp && (explicitSpId === 0 || mId === explicitSpId)) ||
+            (explicitSpId > 0 && (explicitSpId === mId || explicitSpId === mSpId))
+          );
+        });
+
+        let sourceMain = priorMains.find(
+          (mId) => (simAutoVaultByMain.get(mId) || 0) + 1e-6 >= r1EntryPrice
+        );
+        if (sourceMain === undefined) {
+          sourceMain = priorMains.find((mId) => {
+            if (usedExtraR2To3.has(mId)) return false;
+            const r1Bal = simAutoVaultByMain.get(mId) || 0;
+            const extraBal = extraR2To3VaultByMain.get(mId) || 0;
+            return r1Bal + extraBal + 1e-6 >= r1EntryPrice;
+          });
+          if (sourceMain !== undefined) {
+            usedExtraR2To3.add(sourceMain);
+            simAutoVaultByMain.set(
+              sourceMain,
+              Number(
+                ((simAutoVaultByMain.get(sourceMain) || 0) +
+                  (extraR2To3VaultByMain.get(sourceMain) || 0)).toFixed(4)
+              )
+            );
+          }
+        }
+
+        if (sourceMain !== undefined) {
+          n.originType = 'AUTO_NEW_MAIN';
+          autoMainSourceMap.set(n.id, sourceMain);
+          spawnedCountByMain.set(sourceMain, (spawnedCountByMain.get(sourceMain) || 0) + 1);
+          simAutoVaultByMain.set(
+            sourceMain,
+            Math.max(0, Number(((simAutoVaultByMain.get(sourceMain) || 0) - r1EntryPrice).toFixed(4)))
+          );
+        }
+      }
+
+      const list = ownerAllMainsMap.get(oKey) || [];
+      list.push(n.id);
+      ownerAllMainsMap.set(oKey, list);
+    }
+
+    if (n.parentId > 0) {
+      const p = byIdR1.get(n.parentId);
+      if (p && p.leftChild === n.id && !n.isExtraId) {
+        const pMain = p.isClone ? (p.originMainId || p.id) : p.id;
+        if (getMainWindow5Start(pMain) > 1) {
+          const addV = Number((r1EntryPrice * 0.35).toFixed(4));
+          simAutoVaultByMain.set(
+            pMain,
+            Number(((simAutoVaultByMain.get(pMain) || 0) + addV).toFixed(4))
+          );
+        }
+      }
+    }
+  }
+
+  return autoMainSourceMap;
+}
+
 function reconcileAutoExtraIdsAcrossRanks(): Array<{
   mainId: number;
   targetRank: number;
@@ -1485,6 +1712,9 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
     matrixDB.nodesByRank[r] = reconcileRankTreeLinks(realNodes);
     matrixDB.rankCounts[r] = Math.max(1, matrixDB.nodesByRank[r].length);
   }
+
+  // Always reconcile Rank 1 Auto Main IDs (Pool 2) so originType === 'AUTO_NEW_MAIN' is up to date
+  reconcileRank1AutoMainIds();
 
   // If the deployed contract natively spawns Auto Extra IDs on-chain, do not synthesize duplicate off-chain Extra IDs
   if (hasRealOnChainExtraIds) {
@@ -3622,6 +3852,14 @@ async function startApp() {
       }
     }
 
+    const autoMainSourceMap = reconcileRank1AutoMainIds();
+    const spawnedAutoIdsList: number[] = [];
+    for (const [autoId, srcMain] of autoMainSourceMap.entries()) {
+      if (srcMain === mainIdNum) {
+        spawnedAutoIdsList.push(autoId);
+      }
+    }
+
     const upgradeHistory = (matrixDB.upgradeLogs || []).filter(
       (u) => Number(u.mainNodeId) === mainIdNum
     );
@@ -3636,6 +3874,8 @@ async function startApp() {
       upgradeRankPool: Number(upgradeRankPool.toFixed(2)),
       newAutoIdPool: Number(newAutoIdPool.toFixed(2)),
       newExtraIdPool: Number(newExtraIdPool.toFixed(2)),
+      totalAutoIdCount: spawnedAutoIdsList.length,
+      autoIdsSpawned: spawnedAutoIdsList,
       totalExtraIdCount,
       upgradeHistory,
     };
@@ -3732,9 +3972,8 @@ async function startApp() {
         if (!matrixDB.upgradeLogs || matrixDB.upgradeLogs.length === 0) rebuildDatabaseUpgradeLogsFromNodes();
       }
 
+      const autoMainSourceMap = reconcileRank1AutoMainIds();
       const r1Nodes = matrixDB.nodesByRank[1] || [];
-      const EXPLICIT_AUTO_MAIN_IDS = new Set<number>([9, 10, 13, 20, 21, 24, 25]);
-      const EXPLICIT_MANUAL_MAIN_IDS = new Set<number>([1, 2, 3, 5, 7, 15, 17, 18]);
 
       // Helper to resolve canonical Rank 1 Main ID for any node in any rank
       const resolveCanonicalMainId = (rankNum: number, node: IndexedTreeNode): number => {
@@ -3779,17 +4018,50 @@ async function startApp() {
         directSponsorNodeId: number;
         owner: string;
         cloneRound?: number;
+        cloneSequence?: number;
+      }
+
+      interface TierLevelBreakdownItem {
+        tier: number;
+        maxCapacity: number;
+        totalNodesInTier: number;
+        leftPayingNodesCount: number;
+        rightRebirthNodesCount: number;
+        ratePerNodeUsdt: number;
+        amountUsdt: number;
+        allNodeIds: number[];
+        leftNodeIds: number[];
+        rightNodeIds: number[];
+      }
+
+      interface PerIdLevelSummary {
+        maxLevels: number;
+        receivedLevelsCount: number;
+        remainingLevelsCount: number;
+        ratePerNodeUsdt: number;
+        thisNodeLevelTotalUsdt: number;
+        clonesLevelTotalUsdt: number;
+        combinedLevelTotalUsdt: number;
+        summaryTextTh: string;
+        tiersBreakdown: TierLevelBreakdownItem[];
       }
 
       interface PerIdReport {
         id: number;
         label: string;
         nodeType: 'MANUAL_ID' | 'AUTO_ID' | 'CLONE_ID' | 'EXTRA_ID';
+        typeBadge: string;
+        isClone: boolean;
+        isAutoId: boolean;
+        isExtraId: boolean;
         originMainId: number;
+        cloneRound?: number;
+        cloneSequence?: number;
         spawnedByMainId: number;
         owner: string;
         directSponsorNodeId: number;
         parentId: number;
+        side: 'LEFT' | 'RIGHT' | 'ROOT';
         sideInR1: 'LEFT' | 'RIGHT' | 'ROOT';
         leftChildR1: number;
         rightChildR1: number;
@@ -3799,21 +4071,30 @@ async function startApp() {
         direct30History: CommissionItem[];
         level30TotalUsdt: number;
         level30History: CommissionItem[];
+        levelSummary: PerIdLevelSummary;
         vault35GrossTotalUsdt: number;
         vault35RemainingTotalUsdt: number;
         vault35DeductedTotalUsdt: number;
         vault35History: CommissionItem[];
+        upgradeRankPool: number;
+        newAutoIdPool: number;
+        newExtraIdPool: number;
         pools: {
           upgradeRankPool: number;
           newAutoIdPool: number;
           newExtraIdPool: number;
         };
+        totalAutoIdCount: number;
+        totalExtraIdCount: number;
+        totalClonesCount: number;
         autoIdsSpawned: SpawnedIdItem[];
         autoExtraIdsSpawned: SpawnedIdItem[];
         clonesSpawned: SpawnedIdItem[];
       }
 
       const reportsMap = new Map<number, PerIdReport>();
+      const r1NodesMap = new Map<number, IndexedTreeNode>();
+      for (const n of r1Nodes) r1NodesMap.set(n.id, n);
 
       for (const r1Node of r1Nodes) {
         const pNode = r1Nodes.find((x) => x.id === r1Node.parentId);
@@ -3827,8 +4108,7 @@ async function startApp() {
         const isAutoMain =
           !r1Node.isClone &&
           !r1Node.isExtraId &&
-          (EXPLICIT_AUTO_MAIN_IDS.has(r1Node.id) ||
-            (r1Node.originType === 'AUTO_NEW_MAIN' && !EXPLICIT_MANUAL_MAIN_IDS.has(r1Node.id)));
+          (autoMainSourceMap.has(r1Node.id) || r1Node.originType === 'AUTO_NEW_MAIN');
 
         const nodeType: PerIdReport['nodeType'] = r1Node.isClone
           ? 'CLONE_ID'
@@ -3838,9 +4118,17 @@ async function startApp() {
           ? 'AUTO_ID'
           : 'MANUAL_ID';
 
+        const typeBadge = r1Node.isClone
+          ? 'CLONE ID'
+          : r1Node.isExtraId
+          ? 'EXTRA ID'
+          : isAutoMain
+          ? 'AUTO ID'
+          : 'MAIN ID';
+
         const origMainId = r1Node.isClone ? (r1Node.originMainId || r1Node.id) : r1Node.id;
         const spawnedByMainId = isAutoMain
-          ? r1Node.directSponsorNodeId || 1
+          ? autoMainSourceMap.get(r1Node.id) || r1Node.directSponsorNodeId || 1
           : r1Node.isClone
           ? origMainId
           : 0;
@@ -3895,6 +4183,55 @@ async function startApp() {
           });
         }
 
+        // Compute 15-Level subtree breakdown directly below this r1Node in Rank 1
+        const tiersBreakdown: TierLevelBreakdownItem[] = [];
+        let currentFrontier: number[] = [r1Node.id];
+        const visitedSubtree = new Set<number>([r1Node.id]);
+        const ratePerNodeR1 = Number(((RANK_PRICES_USDT[0] || 5) * 0.02).toFixed(2)); // 0.10 USDT
+        let thisNodeLevelTotalUsdt = 0;
+
+        for (let tier = 1; tier <= 15; tier++) {
+          const nextFrontier: number[] = [];
+          const leftNodeIds: number[] = [];
+          const rightNodeIds: number[] = [];
+          for (const pId of currentFrontier) {
+            const pObj = r1NodesMap.get(pId);
+            if (!pObj) continue;
+            if (pObj.leftChild > 0 && r1NodesMap.has(pObj.leftChild) && !visitedSubtree.has(pObj.leftChild)) {
+              visitedSubtree.add(pObj.leftChild);
+              nextFrontier.push(pObj.leftChild);
+              leftNodeIds.push(pObj.leftChild);
+            }
+            if (pObj.rightChild > 0 && r1NodesMap.has(pObj.rightChild) && !visitedSubtree.has(pObj.rightChild)) {
+              visitedSubtree.add(pObj.rightChild);
+              nextFrontier.push(pObj.rightChild);
+              rightNodeIds.push(pObj.rightChild);
+            }
+          }
+          if (nextFrontier.length === 0) break;
+          const tierAmt = Number((leftNodeIds.length * ratePerNodeR1).toFixed(2));
+          thisNodeLevelTotalUsdt = Number((thisNodeLevelTotalUsdt + tierAmt).toFixed(2));
+          tiersBreakdown.push({
+            tier,
+            maxCapacity: Math.pow(2, tier),
+            totalNodesInTier: nextFrontier.length,
+            leftPayingNodesCount: leftNodeIds.length,
+            rightRebirthNodesCount: rightNodeIds.length,
+            ratePerNodeUsdt: ratePerNodeR1,
+            amountUsdt: tierAmt,
+            allNodeIds: nextFrontier,
+            leftNodeIds,
+            rightNodeIds,
+          });
+          currentFrontier = nextFrontier;
+        }
+
+        const receivedLevelsCount = tiersBreakdown.filter((t) => t.leftPayingNodesCount > 0 || t.totalNodesInTier > 0).length;
+        const remainingLevelsCount = Math.max(0, 15 - receivedLevelsCount);
+        const perTierStr = tiersBreakdown
+          .map((t) => `ชั้น ${t.tier}: ${t.amountUsdt.toFixed(2)} USDT (${t.leftPayingNodesCount} เม็ดซ้าย)`)
+          .join(', ');
+
         reportsMap.set(r1Node.id, {
           id: r1Node.id,
           label: r1Node.isClone
@@ -3903,11 +4240,18 @@ async function startApp() {
             ? `Auto ID #${r1Node.id}`
             : `Main ID #${r1Node.id}`,
           nodeType,
+          typeBadge,
+          isClone: Boolean(r1Node.isClone),
+          isAutoId: Boolean(isAutoMain),
+          isExtraId: Boolean(r1Node.isExtraId),
           originMainId: origMainId,
+          cloneRound: r1Node.isClone ? (r1Node.cloneRound || 1) : 0,
+          cloneSequence: r1Node.isClone ? (r1Node.cloneSequence || 1) : 0,
           spawnedByMainId,
           owner: r1Node.owner,
           directSponsorNodeId: r1Node.directSponsorNodeId || (r1Node.id === 1 ? 0 : 1),
           parentId: r1Node.parentId,
+          side: sideInR1,
           sideInR1,
           leftChildR1: r1Node.leftChild,
           rightChildR1: r1Node.rightChild,
@@ -3917,15 +4261,35 @@ async function startApp() {
           direct30History: [],
           level30TotalUsdt: 0,
           level30History: [],
+          levelSummary: {
+            maxLevels: 15,
+            receivedLevelsCount,
+            remainingLevelsCount,
+            ratePerNodeUsdt: ratePerNodeR1,
+            thisNodeLevelTotalUsdt,
+            clonesLevelTotalUsdt: 0,
+            combinedLevelTotalUsdt: thisNodeLevelTotalUsdt,
+            summaryTextTh:
+              receivedLevelsCount > 0
+                ? `รับไปแล้ว ${receivedLevelsCount}/15 ชั้น (${perTierStr}) • เหลืออีก ${remainingLevelsCount} ชั้น`
+                : `รับไปแล้ว 0/15 ชั้น • เหลืออีก 15 ชั้น`,
+            tiersBreakdown,
+          },
           vault35GrossTotalUsdt: 0,
           vault35RemainingTotalUsdt: 0,
           vault35DeductedTotalUsdt: 0,
           vault35History: [],
+          upgradeRankPool: stats.upgradeRankPool,
+          newAutoIdPool: stats.newAutoIdPool,
+          newExtraIdPool: stats.newExtraIdPool,
           pools: {
             upgradeRankPool: stats.upgradeRankPool,
             newAutoIdPool: stats.newAutoIdPool,
             newExtraIdPool: stats.newExtraIdPool,
           },
+          totalAutoIdCount: 0,
+          totalExtraIdCount: 0,
+          totalClonesCount: 0,
           autoIdsSpawned: [],
           autoExtraIdsSpawned: [],
           clonesSpawned: [],
@@ -3937,10 +4301,9 @@ async function startApp() {
         const isAutoMain =
           !r1Node.isClone &&
           !r1Node.isExtraId &&
-          (EXPLICIT_AUTO_MAIN_IDS.has(r1Node.id) ||
-            (r1Node.originType === 'AUTO_NEW_MAIN' && !EXPLICIT_MANUAL_MAIN_IDS.has(r1Node.id)));
+          (autoMainSourceMap.has(r1Node.id) || r1Node.originType === 'AUTO_NEW_MAIN');
         if (isAutoMain) {
-          const spId = r1Node.directSponsorNodeId || 1;
+          const spId = autoMainSourceMap.get(r1Node.id) || r1Node.directSponsorNodeId || 1;
           const spReport = reportsMap.get(spId);
           const pNode = r1Nodes.find((x) => x.id === r1Node.parentId);
           const side: 'LEFT' | 'RIGHT' | 'ROOT' =
@@ -4009,10 +4372,17 @@ async function startApp() {
                 directSponsorNodeId: n.directSponsorNodeId || mainReport.directSponsorNodeId,
                 owner: n.owner,
                 cloneRound: n.cloneRound || 1,
+                cloneSequence: n.cloneSequence || 1,
               });
             }
           }
         }
+      }
+
+      for (const rep of reportsMap.values()) {
+        rep.totalAutoIdCount = rep.autoIdsSpawned.length;
+        rep.totalExtraIdCount = rep.autoExtraIdsSpawned.length;
+        rep.totalClonesCount = rep.clonesSpawned.length;
       }
 
       // Compute exact 30% Direct, 30% Level (2% x 15), 35% Upgrade Vault history per ID, AND AllSell (4%) + FamilyPool across Ranks 1..27
@@ -4083,8 +4453,8 @@ async function startApp() {
             ? `Extra R${rankNum}-#${child.id}`
             : child.isClone
             ? `โคลน R${rankNum}-#${child.id} (ของ Main #${childCanonMainId})`
-            : EXPLICIT_AUTO_MAIN_IDS.has(childCanonMainId) && rankNum === 1
-            ? `Auto ID #${child.id}`
+            : autoMainSourceMap.has(childCanonMainId)
+            ? `Auto ID #${childCanonMainId} (R${rankNum}-#${child.id})`
             : `Main #${childCanonMainId} (R${rankNum}-#${child.id})`;
 
           // Every Left-Child placement generates 4% AllSell & 1% Bot
@@ -4337,13 +4707,23 @@ async function startApp() {
         // Fallback to 0 if RPC timeout
       }
 
-      // Compute remaining & deducted Vault for each ID
+      // Compute remaining & deducted Vault + finalize levelSummary (clonesLevelTotalUsdt & combinedLevelTotalUsdt) for each ID
       for (const rep of reportsMap.values()) {
         const rem = rep.rankNodesList.reduce((acc, rItem) => acc + Number(rItem.nodeVault || 0), 0);
         rep.vault35RemainingTotalUsdt = Number(rem.toFixed(2));
         rep.vault35DeductedTotalUsdt = Number(
           Math.max(0, rep.vault35GrossTotalUsdt - rep.vault35RemainingTotalUsdt).toFixed(2)
         );
+        if (!rep.isClone) {
+          const cloneLvlSum = Number(
+            Math.max(0, rep.level30TotalUsdt - rep.levelSummary.thisNodeLevelTotalUsdt).toFixed(2)
+          );
+          rep.levelSummary.clonesLevelTotalUsdt = cloneLvlSum;
+          rep.levelSummary.combinedLevelTotalUsdt = Number(rep.level30TotalUsdt.toFixed(2));
+        } else {
+          rep.levelSummary.clonesLevelTotalUsdt = 0;
+          rep.levelSummary.combinedLevelTotalUsdt = Number(rep.levelSummary.thisNodeLevelTotalUsdt.toFixed(2));
+        }
       }
 
       const allReports = Array.from(reportsMap.values()).sort((a, b) => a.id - b.id);
