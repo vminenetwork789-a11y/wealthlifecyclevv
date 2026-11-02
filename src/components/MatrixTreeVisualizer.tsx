@@ -684,6 +684,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   const [isModalUpgrading, setIsModalUpgrading] = useState<boolean>(false);
   const [modalUpgradeMessage, setModalUpgradeMessage] = useState<string | null>(null);
   const [modalUpgradeError, setModalUpgradeError] = useState<string | null>(null);
+  const [isWalletIdsModalOpen, setIsWalletIdsModalOpen] = useState<boolean>(false);
+  const [selectedInspectWallet, setSelectedInspectWallet] = useState<string>('');
 
   const fetchPerIdHistoryForModal = useCallback(async () => {
     try {
@@ -707,7 +709,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     fetchPerIdHistoryForModal();
   }, [fetchPerIdHistoryForModal, selectedRank, refreshTrigger, lastTxSuccess]);
 
-  const [isLoadingTree, setIsLoadingTree] = useState<boolean>(false);
+  const [isLoadingTree, setIsLoadingTree] = useState<boolean>(true);
+  const [hasInitialTreeLoaded, setHasInitialTreeLoaded] = useState<boolean>(false);
   const [totalNodesInRank, setTotalNodesInRank] = useState<number>(1);
   const [onChainNodesMap, setOnChainNodesMap] = useState<Map<number, EnrichedBinaryNode>>(new Map());
   const [copiedText, setCopiedText] = useState<string | null>(null);
@@ -800,6 +803,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
       if (!isSilent) {
         setIsLoadingTree(true);
+        setConnectorLines([]);
       } else {
         setIsLiveSyncing(true);
       }
@@ -3257,6 +3261,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
+        if (!isSilent) {
+          await fetchPerIdHistoryForModal();
+        }
+
         knownNodeIdsByRankRef.current.set(activeRank, currentIdsSet);
         setOnChainNodesMap(enrichedMap);
         setLastSyncTime(
@@ -3271,9 +3279,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       } finally {
         setIsLoadingTree(false);
         setIsLiveSyncing(false);
+        setHasInitialTreeLoaded(true);
       }
     },
-    [getWorkingProvider, selectedRank, contractAddress]
+    [getWorkingProvider, selectedRank, contractAddress, fetchPerIdHistoryForModal]
   );
 
   useEffect(() => {
@@ -4047,9 +4056,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     const node = activeNodesMap.get(resolvedId);
     if (!node) return null;
 
-    // When maxRenderDepth === 0 (Auto), automatically render all levels needed to show every connected node
+    // When maxRenderDepth === 0 (Auto Max), automatically render all levels needed to show every connected node
     const effectiveMaxDepth =
-      maxRenderDepth === 0 ? Math.max(15, maxTreeLevelInRank + 2) : maxRenderDepth;
+      maxRenderDepth === 0 ? Math.max(30, maxTreeLevelInRank + 5) : maxRenderDepth;
     const hasLeft = node.leftChild > 0 && activeNodesMap.has(node.leftChild);
     const hasRight = node.rightChild > 0 && activeNodesMap.has(node.rightChild);
     const showChildrenRow =
@@ -4081,40 +4090,43 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     return Array.from(activeNodesMap.values()).filter((n) => n.isClone);
   }, [activeNodesMap]);
 
+  if (!hasInitialTreeLoaded) {
+    return (
+      <div className="w-full min-h-[460px] bg-[#0b1020] border border-slate-800 rounded-2xl sm:rounded-3xl p-8 flex flex-col items-center justify-center gap-4 shadow-2xl">
+        <div className="p-4 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-400 shadow-lg">
+          <RefreshCw className="w-9 h-9 animate-spin" />
+        </div>
+        <div className="text-center space-y-1.5">
+          <h3 className="text-base sm:text-lg font-extrabold text-white">
+            {language === 'th'
+              ? 'กำลังโหลดข้อมูลผังต้นไม้ไบนารี่และคำนวณผลประโยชน์ทั้งหมด...'
+              : 'Loading Binary Matrix Tree & Benefit Data...'}
+          </h3>
+          <p className="text-xs text-slate-400">
+            {language === 'th'
+              ? 'ระบบจะแสดงผลผังเมื่อโหลดข้อมูลครบทุกโหนดและทุกกระดานเรียบร้อยแล้ว'
+              : 'The tree will be displayed once all nodes and rank data finish loading.'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-full h-auto bg-[#0b1020] border border-slate-800 rounded-2xl sm:rounded-3xl p-3 sm:p-5 md:p-6 shadow-2xl space-y-3 sm:space-y-3.5">
+    <div className="w-full max-w-none min-h-[calc(100vh-56px)] h-full flex flex-col bg-[#0b1020] border border-slate-800 rounded-xl sm:rounded-2xl p-2 sm:p-4 shadow-2xl space-y-2.5 sm:space-y-3">
       {/* Top Header & Controls Block (Stacked neatly matching screenshot) */}
       <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90">
-        {/* Row 1: Title & Register Button */}
+        {/* Row 1: Title */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
-              <span>🌳 ผังต้นไม้ไบนารี่ 27 Ranks</span>
-            </h2>
-            {justUpdatedBadge && (
-              <span className="text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400 font-semibold flex items-center gap-1 animate-pulse">
-                <Check className="w-3 h-3 text-emerald-300" />
-                <span>อัปเดตต่อผังอัตโนมัติแล้ว</span>
-              </span>
-            )}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              if (onOpenRegisterModal) {
-                onOpenRegisterModal();
-              } else {
-                openRegisterModal(focusRootId || 1);
-              }
-            }}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold text-xs shadow-lg shadow-emerald-950/60 border border-emerald-300/40 transition cursor-pointer flex items-center gap-1.5"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-slate-950 shrink-0" />
-            <span>
-              {language === 'th' ? '+ สมัครสมาชิก / ลงรหัสเพิ่ม' : '+ Register / Add ID'}
+          <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
+            <span>🌳 ผังต้นไม้ไบนารี่ 27 Ranks</span>
+          </h2>
+          {justUpdatedBadge && (
+            <span className="text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400 font-semibold flex items-center gap-1 animate-pulse">
+              <Check className="w-3 h-3 text-emerald-300" />
+              <span>อัปเดตต่อผังอัตโนมัติแล้ว</span>
             </span>
-          </button>
+          )}
         </div>
 
         {/* Row 2: Contract Address Badge & Auto-Extend Status */}
@@ -4184,9 +4196,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              ทั้งหมด (Auto {maxTreeLevelInRank} ชั้น)
+              เต็ม Max ทั้งหมด ({maxTreeLevelInRank} ชั้น)
             </button>
-            {[4, 6, 8, 12, 15].map((depthVal) => (
+            {[4, 6, 8, 12, 15, 25].map((depthVal) => (
               <button
                 key={depthVal}
                 type="button"
@@ -4752,60 +4764,105 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         </div>
       )}
 
-      {/* 4. Main Auto-Height & Auto-Width Binary Tree Viewport */}
-      <div
-        ref={scrollViewportRef}
-        className="w-full h-auto rounded-2xl sm:rounded-3xl bg-[#080c17] border border-slate-800/90 p-3 sm:p-6 md:p-8 overflow-x-auto overflow-y-visible matrix-scroll-container"
-      >
+      {/* 4. Main Full-Max Height & Full-Max Width Binary Tree Viewport */}
+      <div className="relative w-full max-w-none flex-1 flex flex-col min-h-[85vh]">
         <div
-          style={{
-            zoom: zoomScale,
-          }}
-          className="w-max min-w-full h-auto flex justify-center items-start mx-auto"
+          ref={scrollViewportRef}
+          className="w-full max-w-none flex-1 min-h-[85vh] h-full rounded-xl sm:rounded-2xl bg-[#080c17] border border-slate-800/90 p-2 sm:p-5 md:p-6 pb-20 sm:pb-24 overflow-x-auto overflow-y-auto matrix-scroll-container"
         >
           <div
-            ref={treeContentRef}
-            className="relative inline-flex flex-col items-center h-auto w-max px-2 sm:px-4 py-3"
+            style={{
+              zoom: zoomScale,
+            }}
+            className="w-max min-w-full min-h-full h-max flex justify-center items-start mx-auto"
           >
-            {/* Dynamic SVG Curved Connector Lines Overlay */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-visible">
-              {connectorLines.map((line) => {
-                const midY = line.y1 + (line.y2 - line.y1) * 0.5;
-                const d = `M ${line.x1} ${line.y1} C ${line.x1} ${midY}, ${line.x2} ${midY}, ${line.x2} ${line.y2}`;
-                const strokeColor = line.isFilled
-                  ? line.isLeft
-                    ? '#10b981'
-                    : '#a855f7'
-                  : '#64748b';
+            <div
+              ref={treeContentRef}
+              className="relative inline-flex flex-col items-center h-max w-max px-4 sm:px-8 py-4 pb-16"
+            >
+              {/* Dynamic SVG Curved Connector Lines Overlay */}
+              {!isLoadingTree && (
+                <svg className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-visible">
+                  {connectorLines.map((line) => {
+                    const midY = line.y1 + (line.y2 - line.y1) * 0.5;
+                    const d = `M ${line.x1} ${line.y1} C ${line.x1} ${midY}, ${line.x2} ${midY}, ${line.x2} ${line.y2}`;
+                    const strokeColor = line.isFilled
+                      ? line.isLeft
+                        ? '#10b981'
+                        : '#a855f7'
+                      : '#64748b';
 
-                return (
-                  <path
-                    key={line.key}
-                    d={d}
-                    fill="none"
-                    stroke={strokeColor}
-                    strokeWidth="2.2"
-                    strokeDasharray={line.isFilled ? undefined : '5 5'}
-                    strokeLinecap="round"
-                  />
-                );
-              })}
-            </svg>
+                    return (
+                      <path
+                        key={line.key}
+                        d={d}
+                        fill="none"
+                        stroke={strokeColor}
+                        strokeWidth="2.2"
+                        strokeDasharray={line.isFilled ? undefined : '5 5'}
+                        strokeLinecap="round"
+                      />
+                    );
+                  })}
+                </svg>
+              )}
 
-            {/* Recursive Binary Tree Nodes */}
-            {isLoadingTree && activeNodesMap.size === 0 ? (
-              <div className="py-16 flex flex-col items-center justify-center gap-3 text-slate-400">
-                <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
-                <span className="text-sm font-semibold">
-                  {language === 'th'
-                    ? 'กำลังโหลดข้อมูลผังต้นไม้ไบนารี่จากบล็อกเชน...'
-                    : 'Loading binary tree nodes from blockchain...'}
-                </span>
-              </div>
-            ) : (
-              renderBinarySubtree(focusRootId, 1)
-            )}
+              {/* Recursive Binary Tree Nodes */}
+              {isLoadingTree || activeNodesMap.size === 0 ? (
+                <div className="py-16 flex flex-col items-center justify-center gap-3 text-slate-400">
+                  <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
+                  <span className="text-sm font-semibold">
+                    {language === 'th'
+                      ? `กำลังโหลดข้อมูลผัง Rank ${selectedRank} และคำนวณผลประโยชน์...`
+                      : `Loading Rank ${selectedRank} binary tree nodes...`}
+                  </span>
+                </div>
+              ) : (
+                renderBinarySubtree(focusRootId, 1)
+              )}
+            </div>
           </div>
+        </div>
+
+        {/* แถบจัดเรียง 2 ปุ่มด้านล่างสุดของผัง (ซ้าย: ดูข้อมูล ID ของกระเป๋านี้ | ขวา: สมัครสมาชิก / ลงรหัสเพิ่ม) ไม่ซ้อนทับกัน */}
+        <div className="absolute bottom-2.5 left-2 right-2 sm:bottom-4 sm:left-4 sm:right-4 z-30 flex items-center justify-between gap-1.5 sm:gap-3 pointer-events-none">
+          {/* ปุ่มดูข้อมูล ID ของกระเป๋านี้ ด้านซ้ายล่างสุดของผัง */}
+          <button
+            type="button"
+            onClick={() => {
+              const focusedOwner =
+                activeNodesMap.get(focusRootId)?.owner ||
+                activeNodesMap.get(1)?.owner ||
+                '0x622E20082e63c7220c5AF0A77Cbc437a98505311';
+              setSelectedInspectWallet(userAddress || focusedOwner);
+              fetchPerIdHistoryForModal();
+              setIsWalletIdsModalOpen(true);
+            }}
+            className="pointer-events-auto flex-1 sm:flex-initial max-w-[49%] sm:max-w-none justify-center px-2.5 py-2 sm:px-4 sm:py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-extrabold text-[10.5px] sm:text-xs md:text-sm shadow-[0_6px_20px_rgba(99,102,241,0.45)] border border-indigo-400/60 transition cursor-pointer flex items-center gap-1 sm:gap-1.5 whitespace-nowrap overflow-hidden"
+          >
+            <User className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" />
+            <span className="truncate">
+              {language === 'th' ? '👛 ดูข้อมูล ID ของกระเป๋านี้' : '👛 View Wallet IDs'}
+            </span>
+          </button>
+
+          {/* ปุ่มสมัครสมาชิก ด้านขวาล่างสุดของผัง */}
+          <button
+            type="button"
+            onClick={() => {
+              if (onOpenRegisterModal) {
+                onOpenRegisterModal();
+              } else {
+                openRegisterModal(focusRootId || 1);
+              }
+            }}
+            className="pointer-events-auto flex-1 sm:flex-initial max-w-[49%] sm:max-w-none justify-center px-2.5 py-2 sm:px-4 sm:py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold text-[10.5px] sm:text-xs md:text-sm shadow-[0_6px_20px_rgba(16,185,129,0.45)] border border-emerald-300/60 transition cursor-pointer flex items-center gap-1 sm:gap-1.5 whitespace-nowrap overflow-hidden"
+          >
+            <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-950 shrink-0" />
+            <span className="truncate">
+              {language === 'th' ? '+ สมัครสมาชิก / ลงรหัสเพิ่ม' : '+ Register / Add ID'}
+            </span>
+          </button>
         </div>
       </div>
 
@@ -5629,6 +5686,353 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   className="px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs shadow-lg cursor-pointer transition"
                 >
                   ปิดหน้าต่างป๊อปอัพ
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ===================================================================== */}
+      {/* POPUP MODAL: ดูข้อมูล ID ของกระเป๋านี้ (เมื่อกดปุ่มซ้ายล่างสุดของผัง) */}
+      {/* ===================================================================== */}
+      {isWalletIdsModalOpen && (() => {
+        const allReports = Array.from(perIdReportsMap.values()).sort(
+          (a: any, b: any) => Number(a.id) - Number(b.id)
+        );
+
+        const uniqueWallets: string[] = [];
+        const seenWallets = new Set<string>();
+        if (userAddress && !seenWallets.has(userAddress.toLowerCase())) {
+          seenWallets.add(userAddress.toLowerCase());
+          uniqueWallets.push(userAddress);
+        }
+        for (const rep of allReports) {
+          const w = String(rep.owner || '');
+          if (w && !seenWallets.has(w.toLowerCase())) {
+            seenWallets.add(w.toLowerCase());
+            uniqueWallets.push(w);
+          }
+        }
+        for (const n of activeNodesMap.values()) {
+          const w = String(n.owner || '');
+          if (w && !seenWallets.has(w.toLowerCase())) {
+            seenWallets.add(w.toLowerCase());
+            uniqueWallets.push(w);
+          }
+        }
+
+        const activeWallet =
+          selectedInspectWallet ||
+          userAddress ||
+          uniqueWallets[0] ||
+          '0x622E20082e63c7220c5AF0A77Cbc437a98505311';
+        const activeWalletLower = activeWallet.toLowerCase();
+
+        const walletReports = allReports.filter(
+          (rep: any) => String(rep.owner || '').toLowerCase() === activeWalletLower
+        );
+
+        const mainAndAutoReports = walletReports.filter((rep: any) => !rep.isClone);
+        const cloneReports = walletReports.filter((rep: any) => Boolean(rep.isClone));
+
+        const totalDirect30 = mainAndAutoReports.reduce(
+          (sum: number, r: any) => sum + Number(r.direct30TotalUsdt || 0),
+          0
+        );
+        const totalLevel30 = mainAndAutoReports.reduce(
+          (sum: number, r: any) => sum + Number(r.level30TotalUsdt || 0),
+          0
+        );
+        const totalGrossVault35 = mainAndAutoReports.reduce(
+          (sum: number, r: any) => sum + Number(r.vault35GrossTotalUsdt || 0),
+          0
+        );
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setIsWalletIdsModalOpen(false)}
+          >
+            <div
+              className="w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-[#0b1022] border-2 border-indigo-500/60 rounded-2xl shadow-[0_25px_70px_rgba(0,0,0,0.9)] p-4 sm:p-6 space-y-4 text-xs"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="p-2 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-indigo-300">
+                      <User className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-base sm:text-lg font-extrabold text-white">
+                      👛 ข้อมูล ID ทั้งหมดของกระเป๋านี้
+                    </h3>
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold text-[11px]">
+                      ถือครอง {walletReports.length} ID ({mainAndAutoReports.length} รหัสหลัก • {cloneReports.length} โคลน)
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2 flex-wrap">
+                    <span>กระเป๋าที่กำลังดู:</span>
+                    <strong className="text-amber-300 break-all">{activeWallet}</strong>
+                    <button
+                      type="button"
+                      onClick={() => copyAddress(activeWallet)}
+                      className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 cursor-pointer inline-flex items-center gap-1"
+                    >
+                      {copiedText === activeWallet ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span className="text-emerald-400">คัดลอกแล้ว</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>คัดลอก</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsWalletIdsModalOpen(false)}
+                  className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
+                  title="ปิดหน้าต่าง"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Wallet Selector Pills (Switch between connected wallet & other wallets in tree) */}
+              {uniqueWallets.length > 1 && (
+                <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3 space-y-2">
+                  <div className="text-[11px] font-bold text-slate-300">
+                    🔄 เลือกกระเป๋าที่ต้องการดูข้อมูล ID:
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {uniqueWallets.map((wAddr) => {
+                      const isSelected = wAddr.toLowerCase() === activeWalletLower;
+                      const isConnectedUser =
+                        Boolean(userAddress) && wAddr.toLowerCase() === userAddress!.toLowerCase();
+                      const countInW = allReports.filter(
+                        (r: any) => String(r.owner || '').toLowerCase() === wAddr.toLowerCase()
+                      ).length;
+
+                      return (
+                        <button
+                          key={wAddr}
+                          type="button"
+                          onClick={() => setSelectedInspectWallet(wAddr)}
+                          className={`px-3 py-1.5 rounded-xl font-mono text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                            isSelected
+                              ? 'bg-indigo-600 text-white border-indigo-400 shadow-lg shadow-indigo-950/50'
+                              : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-800'
+                          }`}
+                        >
+                          <span>
+                            {wAddr.slice(0, 6)}...{wAddr.slice(-4)}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded bg-black/30 text-amber-300 text-[10px]">
+                            {countInW} ID
+                          </span>
+                          {isConnectedUser && (
+                            <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+                              คุณ
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Wallet Total Earnings Summary Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
+                <div className="bg-slate-950/90 border border-emerald-500/35 rounded-xl p-3">
+                  <span className="text-[10px] text-slate-400 block">รวม 30% ค่าแนะนำ (ทั้งกระเป๋า)</span>
+                  <span className="text-sm sm:text-base font-extrabold text-emerald-400">
+                    +{totalDirect30.toFixed(2)} USDT
+                  </span>
+                </div>
+                <div className="bg-slate-950/90 border border-cyan-500/35 rounded-xl p-3">
+                  <span className="text-[10px] text-slate-400 block">รวม 30% ค่าชั้น (ทั้งกระเป๋า)</span>
+                  <span className="text-sm sm:text-base font-extrabold text-cyan-300">
+                    +{totalLevel30.toFixed(2)} USDT
+                  </span>
+                </div>
+                <div className="bg-slate-950/90 border border-amber-500/35 rounded-xl p-3">
+                  <span className="text-[10px] text-slate-400 block">รวมรับเข้ากระเป๋าทั้งหมด</span>
+                  <span className="text-sm sm:text-base font-extrabold text-amber-300">
+                    +{(totalDirect30 + totalLevel30).toFixed(2)} USDT
+                  </span>
+                </div>
+                <div className="bg-slate-950/90 border border-indigo-500/35 rounded-xl p-3">
+                  <span className="text-[10px] text-slate-400 block">รวม 35% อัพเกรดสะสม</span>
+                  <span className="text-sm sm:text-base font-extrabold text-indigo-300">
+                    +{totalGrossVault35.toFixed(2)} USDT
+                  </span>
+                </div>
+              </div>
+
+              {/* List of IDs Owned by This Wallet */}
+              <div className="space-y-2.5">
+                <div className="text-xs font-bold text-indigo-300 flex items-center justify-between">
+                  <span>📋 รายการ ID ทั้งหมดของกระเป๋านี้ ({walletReports.length} ID):</span>
+                  <span className="text-[11px] text-slate-400 font-normal">
+                    คลิกปุ่ม "ดูผลประโยชน์ / อัพ Rank" เพื่อดูประวัติรายรายการหรือกดอัพแรงค์ของ ID นั้น
+                  </span>
+                </div>
+
+                {walletReports.length === 0 ? (
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-8 text-center text-slate-400">
+                    กระเป๋านี้ยังไม่มีรหัสสมาชิกในระบบ
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {walletReports.map((rep: any) => {
+                      const nodeInActiveRank =
+                        activeNodesMap.get(Number(rep.id)) ||
+                        Array.from(activeNodesMap.values()).find(
+                          (n) => !n.isClone && (n.r1MainId === Number(rep.id) || n.originMainId === Number(rep.id))
+                        );
+
+                      const badgeClass = rep.isClone
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : rep.isAutoId
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40';
+
+                      return (
+                        <div
+                          key={`wallet-id-card-${rep.id}`}
+                          className="bg-slate-950/90 border border-slate-800 hover:border-indigo-500/50 rounded-xl p-3.5 space-y-2.5 transition"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-800/90 pb-2">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-mono font-extrabold text-sm text-amber-400">
+                                {rep.label || `ID #${rep.id}`}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded-full border font-mono font-bold text-[10px] ${badgeClass}`}>
+                                {rep.typeBadge}
+                              </span>
+                            </div>
+                            <span className="px-2 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono font-bold text-[11px]">
+                              Max Rank: R{rep.currentMaxRank || 1}
+                            </span>
+                          </div>
+
+                          <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between">
+                            <span>
+                              อัพไลน์ R1: <strong className="text-white">#{rep.parentId}</strong> ({rep.side})
+                            </span>
+                            <span>
+                              ผู้แนะนำตรง: <strong className="text-amber-300">#{rep.directSponsorNodeId}</strong>
+                            </span>
+                          </div>
+
+                          {/* Earnings & Pools of this ID */}
+                          <div className="grid grid-cols-3 gap-1.5 font-mono text-[10px]">
+                            <div className="bg-slate-900/90 border border-emerald-500/30 rounded-lg p-1.5 text-center">
+                              <span className="text-slate-400 block">30% แนะนำ</span>
+                              <span className="text-emerald-400 font-extrabold text-xs">
+                                +{Number(rep.direct30TotalUsdt || 0).toFixed(2)} U
+                              </span>
+                            </div>
+                            <div className="bg-slate-900/90 border border-cyan-500/30 rounded-lg p-1.5 text-center">
+                              <span className="text-slate-400 block">30% ค่าชั้น</span>
+                              <span className="text-cyan-300 font-extrabold text-xs">
+                                +{Number(rep.level30TotalUsdt || 0).toFixed(2)} U
+                              </span>
+                            </div>
+                            <div className="bg-slate-900/90 border border-indigo-500/30 rounded-lg p-1.5 text-center">
+                              <span className="text-slate-400 block">35% อัพเกรด</span>
+                              <span className="text-indigo-300 font-extrabold text-xs">
+                                +{Number(rep.vault35GrossTotalUsdt || 0).toFixed(2)} U
+                              </span>
+                            </div>
+                          </div>
+
+                          {!rep.isClone && (
+                            <div className="grid grid-cols-3 gap-1.5 font-mono text-[10px]">
+                              <div className="bg-slate-900/60 border border-amber-500/25 rounded-lg p-1 text-center">
+                                <span className="text-slate-400 block">Upgrade Pool</span>
+                                <span className="text-amber-300 font-bold">
+                                  {Number(rep.upgradeRankPool || 0).toFixed(2)} U
+                                </span>
+                              </div>
+                              <div className="bg-slate-900/60 border border-yellow-500/25 rounded-lg p-1 text-center">
+                                <span className="text-slate-400 block">Auto ID</span>
+                                <span className="text-yellow-300 font-bold">
+                                  {(rep.autoIdsSpawned || []).length} รหัส
+                                </span>
+                              </div>
+                              <div className="bg-slate-900/60 border border-rose-500/25 rounded-lg p-1 text-center">
+                                <span className="text-slate-400 block">Extra / โคลน</span>
+                                <span className="text-rose-300 font-bold">
+                                  {(rep.autoExtraIdsSpawned || []).length} / {(rep.clonesSpawned || []).length}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Action Buttons for this ID */}
+                          <div className="flex items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const targetNodeId = nodeInActiveRank ? nodeInActiveRank.id : Number(rep.id);
+                                const curMaxR = Number(rep.currentMaxRank || 1);
+                                setModalUpgradeTargetRank(Math.min(27, curMaxR + 1));
+                                setModalUpgradeMessage(null);
+                                setModalUpgradeError(null);
+                                setBenefitModalTab('all');
+                                if (!activeNodesMap.has(targetNodeId)) {
+                                  setSelectedRank(1);
+                                  loadOnChainTree(1);
+                                }
+                                setIsWalletIdsModalOpen(false);
+                                setExpandedBenefitNodeId(targetNodeId);
+                              }}
+                              className="flex-1 py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-[11px] transition cursor-pointer flex items-center justify-center gap-1 shadow"
+                            >
+                              <Coins className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                              <span>ดูผลประโยชน์ / อัพ Rank</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const targetNodeId = nodeInActiveRank ? nodeInActiveRank.id : Number(rep.id);
+                                if (!activeNodesMap.has(targetNodeId)) {
+                                  setSelectedRank(1);
+                                  loadOnChainTree(1);
+                                }
+                                navigateToNode(targetNodeId);
+                                setIsWalletIdsModalOpen(false);
+                              }}
+                              className="py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-300 border border-slate-700 font-bold text-[11px] transition cursor-pointer"
+                            >
+                              🎯 ไปที่โหนด
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex justify-end pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsWalletIdsModalOpen(false)}
+                  className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs cursor-pointer transition"
+                >
+                  ปิดหน้าต่าง
                 </button>
               </div>
             </div>

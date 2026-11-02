@@ -339,7 +339,7 @@ export default function App() {
         </div>
       )}
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-8">
+      <main className="flex-1 w-full max-w-none mx-auto px-1 sm:px-2.5 py-1.5 sm:py-3 flex flex-col space-y-2.5">
         {/* Global Transaction Status Toast / Banner */}
         {(txState.isLoading || txState.error || txState.successMessage) && (
           <div

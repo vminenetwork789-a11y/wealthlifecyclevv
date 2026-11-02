@@ -461,8 +461,8 @@ export const AuthAndOnboardingGate: React.FC<AuthAndOnboardingGateProps> = ({
         </div>
       </header>
 
-      {/* Main Onboarding Body */}
-      <main className="flex-grow max-w-5xl w-full mx-auto px-3 sm:px-6 py-6 sm:py-8 space-y-6">
+      {/* Main Onboarding Body: แสดงเฉพาะผังต้นไม้ไบนารี่เท่านั้น แบบเต็มหน้าจอ Max */}
+      <main className="flex-grow w-full max-w-none mx-auto px-1 sm:px-2.5 py-1.5 sm:py-3 flex flex-col space-y-2.5">
         {/* Transaction Notification Toast */}
         {(txState.isLoading || txState.error || txState.successMessage) && (
           <div
@@ -510,146 +510,22 @@ export const AuthAndOnboardingGate: React.FC<AuthAndOnboardingGateProps> = ({
           </div>
         )}
 
-        {/* Connected Unregistered Wallet Banner Card */}
-        <div className="bg-gradient-to-br from-amber-950/40 via-slate-900 to-slate-900 border border-amber-500/35 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <h2 className="text-lg sm:text-xl font-bold text-white">
-                {language === 'th'
-                  ? 'สมัครสมาชิกใหม่ Rank 1 (5 USDT)'
-                  : 'New Member Registration - Rank 1 (5 USDT)'}
-              </h2>
-            </div>
-
-            {!isBscTestnet && (
-              <button
-                onClick={onSwitchNetwork}
-                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 transition cursor-pointer"
-              >
-                {language === 'th' ? 'สลับเครือข่ายเป็น BSC Testnet (97)' : 'Switch to BSC Testnet'}
-              </button>
-            )}
-          </div>
-
-          {/* Wallet Info & Balances Strip */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80">
-            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[10px] uppercase text-slate-400 font-semibold">
-                  {language === 'th' ? 'กระเป๋าที่เชื่อมต่อ (Wallet)' : 'Connected Wallet'}
-                </div>
-                <div className="text-xs font-mono text-emerald-300 truncate">
-                  {account}
-                </div>
-              </div>
-              {account && (
-                <button
-                  onClick={() => handleCopyWallet(account)}
-                  className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 shrink-0 cursor-pointer"
-                  title="Copy Address"
-                >
-                  {copiedWallet ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )}
-                </button>
-              )}
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between">
-              <div>
-                <div className="text-[10px] uppercase text-slate-400 font-semibold">
-                  {language === 'th' ? 'ยอดคงเหลือ USDT' : 'USDT Balance'}
-                </div>
-                <div className="text-sm font-bold font-mono text-white">
-                  {usdtBalance} <span className="text-xs text-emerald-400">USDT</span>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-[10px] text-slate-400">
-                  {language === 'th' ? 'ค่าสมัครเริ่มต้น' : 'Entry Cost'}
-                </div>
-                <div className="text-xs font-mono font-bold text-amber-300">5.00 USDT</div>
-              </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between">
-              <div>
-                <div className="text-[10px] uppercase text-slate-400 font-semibold">
-                  {language === 'th' ? 'เหรียญค่าแก๊ส (BNB Testnet)' : 'Gas Balance (tBNB)'}
-                </div>
-                <div className="text-sm font-bold font-mono text-white">
-                  {bnbBalance} <span className="text-xs text-amber-400">tBNB</span>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-[10px] text-slate-400">Allowance</div>
-                <div className="text-xs font-mono text-indigo-300">
-                  {Number(allowance || 0).toFixed(2)} USDT
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Dedicated Registration Form Component */}
-        <RegisterSection
-          account={account}
-          isRegistered={profile?.isRegistered ?? false}
-          mainNodeIdRank1={profile?.mainNodeIdRank1}
+        <MatrixTreeVisualizer
+          language={language}
+          userAddress={account}
+          chainId={chainId}
+          isBscTestnet={isBscTestnet}
+          contractAddress={contractAddress}
           usdtBalance={usdtBalance}
           allowance={allowance}
           onConnectWallet={onConnectWallet}
+          onSwitchNetwork={onSwitchNetwork}
           onApproveUsdt={onApproveUsdt}
-          onRegister={onRegister}
-          onExecuteOffChainBatch={onExecuteOffChainBatch}
-          onCheckSponsor={onCheckSponsor}
-          onPreviewPlacement={onPreviewPlacement}
-          isLoading={txState.isLoading}
-          currentStep={txState.step}
-          txError={txState.error}
-          txSuccess={txState.successMessage}
-          language={language}
+          onRegisterWithSponsor={onRegister}
+          onUpgradeToRank={onUpgradeToRank}
+          lastTxSuccess={txState.successMessage}
+          refreshTrigger={txState.successMessage}
         />
-
-        {/* Optional Live Matrix Tree Preview on Registration Screen */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setShowLiveTreeOnRegisterPage((prev) => !prev)}
-              className="text-xs font-semibold text-indigo-300 hover:text-indigo-200 inline-flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-4 py-2 rounded-xl cursor-pointer"
-            >
-              <Layers className="w-4 h-4 text-indigo-400" />
-              <span>
-                {showLiveTreeOnRegisterPage
-                  ? language === 'th'
-                    ? 'ซ่อนผังโครงสร้าง Binary Matrix 27'
-                    : 'Hide Live Matrix Tree'
-                  : language === 'th'
-                  ? 'ดูผังโครงสร้าง Binary Matrix 27 ประกอบการเลือกผู้แนะนำ'
-                  : 'Show Live Matrix Tree to Pick Sponsor'}
-              </span>
-            </button>
-          </div>
-
-          {showLiveTreeOnRegisterPage && (
-            <MatrixTreeVisualizer
-              language={language}
-              userAddress={account}
-              chainId={chainId}
-              isBscTestnet={isBscTestnet}
-              contractAddress={contractAddress}
-              onConnectWallet={onConnectWallet}
-              onSwitchNetwork={onSwitchNetwork}
-              onRegisterWithSponsor={onRegister}
-              onUpgradeToRank={onUpgradeToRank}
-              lastTxSuccess={txState.successMessage}
-              refreshTrigger={txState.successMessage}
-            />
-          )}
-        </div>
       </main>
     </div>
   );
