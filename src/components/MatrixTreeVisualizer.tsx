@@ -1411,7 +1411,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const hasAnyRightTrigger = Array.from(sMap.values()).some(
             (m) =>
               !removedFalseCloneIds.has(m.id) &&
-              (m.id === origId || (m.isClone && (m.originMainId || m.id) === origId)) &&
+              (m.id === origId || (m.originMainId || m.id) === origId) &&
               m.rightChild > 0 &&
               sMap.has(m.rightChild)
           );
@@ -2171,8 +2171,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             const rUnitVault = (RANK_PRICES_USDT[r - 1] || 5) * 0.35;
             let leftCountInR = 0;
             for (const sn of snapR.values()) {
-              const snOrigin = sn.isClone ? sn.originMainId : sn.id;
-              if (snOrigin === correspId && sn.leftChild > 0) {
+              const isSnSameMain =
+                sn.id === correspId ||
+                (sn.isClone && (sn.originMainId === correspId || sn.originMainId === r1Id));
+              if (isSnSameMain && sn.leftChild > 0) {
                 leftCountInR++;
               }
             }
@@ -2230,8 +2232,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             const rUnitVault = (RANK_PRICES_USDT[r - 1] || 30) * 0.35;
             let leftCountInR = 0;
             for (const sn of snapR.values()) {
-              const snOrigin = sn.isClone ? sn.originMainId : sn.id;
-              if (snOrigin === correspId && sn.leftChild > 0) {
+              const isSnSameMain =
+                sn.id === correspId ||
+                (sn.isClone && (sn.originMainId === correspId || sn.originMainId === r1Id));
+              if (isSnSameMain && sn.leftChild > 0) {
                 leftCountInR++;
               }
             }

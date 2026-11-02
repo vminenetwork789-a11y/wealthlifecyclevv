@@ -36,7 +36,7 @@ const DEFAULT_SYSTEM_CONFIG = {
   contractAddress:
     process.env.OVERRIDE_CONTRACT_ADDRESS ||
     process.env.CONTRACT_ADDRESS ||
-    '0x2df74a86Df9D32c735755e1F448a98F4cdA456c5',
+    '0xF955dE5c1A403c9d286538A872c17837AEBDD8cA',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
@@ -62,6 +62,7 @@ const SERVER_LEGACY_CONTRACTS = new Set([
   '0x2246c327b711c7ba82ad35af42371253aa88d6e6',
   '0xcf8d2348894ab77dcd1529c869e526924e2a7c3d',
   '0xa285257430fbff1bb63c0a74958874a5bf159ccd',
+  '0x2df74a86df9d32c735755e1f448a98f4cda456c5',
 ]);
 
 const SERVER_LEGACY_USDT = new Set([
@@ -1226,7 +1227,7 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
       const hasAnyRightTrigger = nodes.some(
         (m) =>
           !removedFalseCloneIds.has(m.id) &&
-          (m.id === origId || (m.isClone && (m.originMainId || m.id) === origId)) &&
+          (m.id === origId || (m.originMainId || m.id) === origId) &&
           m.rightChild > 0 &&
           byId.has(m.rightChild)
       );
