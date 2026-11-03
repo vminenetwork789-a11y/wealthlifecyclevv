@@ -46,7 +46,10 @@
             str.indexOf('SecurityError') !== -1 ||
             str.indexOf('chrome-extension://') !== -1 ||
             str.indexOf('moz-extension://') !== -1 ||
-            str.indexOf('inpage.js') !== -1
+            str.indexOf('inpage.js') !== -1 ||
+            str.indexOf('WebSocket closed without opened') !== -1 ||
+            str.indexOf('failed to connect to websocket') !== -1 ||
+            str.indexOf('@vite/client') !== -1
           );
         }
 

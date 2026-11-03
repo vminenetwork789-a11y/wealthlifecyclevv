@@ -48,9 +48,10 @@ export interface MainIdVaultBreakdown {
 export function calculateMainIdVaultPools(
   mainId: number,
   currentRank: number,
-  vaultByRank: Record<number, number> = {}
+  vaultByRank: Record<number, number> = {},
+  extraLeftVaultBonus: number = 0
 ): MainIdVaultBreakdown {
-  const safeRank = Math.max(1, Math.min(27, currentRank || 1));
+  const safeRank = Math.max(1, Math.min(27, mainId === 1 ? 27 : (currentRank || 1)));
   const window5Start = Math.max(1, safeRank - 4);
   const window5End = safeRank;
 
@@ -60,10 +61,12 @@ export function calculateMainIdVaultPools(
   }
 
   // 1. Upgrade Rank Pool: ยอดสะสม Vault (35%) ของ 5 rank ย้อนหลัง
-  // (สถานะ rank ปัจจุบันของ idหลักนั้น ถอยหลัง 5 rank)
+  // (สถานะ rank ปัจจุบันของ idหลักนั้น ถอยหลัง 5 rank • หากอยู่ Rank 27 สูงสุดแล้ว Upgrade Pool = 0 เพราะยอด R4-R27 อยู่ใน Extra ID Pool ทั้งหมด)
   let upgradeRankPool = 0;
-  for (const r of window5Ranks) {
-    upgradeRankPool += Number(vaultByRank[r] || 0);
+  if (safeRank < 27) {
+    for (const r of window5Ranks) {
+      upgradeRankPool += Number(vaultByRank[r] || 0);
+    }
   }
 
   // 2. New Auto ID Pool: ยอดสะสม Vault (35%) ใน Rank 1 ถึง 3 ลบด้วย 5 rank ย้อนหลังของรหัสหลักนั้น
@@ -80,7 +83,7 @@ export function calculateMainIdVaultPools(
   //   ยอดสะสม Vault (35%) ใน Rank 4 ถึง 27 ลบด้วย 5 rank ย้อนหลังของรหัสหลักนั้น (r in 4..27 && r < window5Start)
   // - สถานะ rank ปัจจุบันของ idหลักนั้น เท่ากับ 27:
   //   ยอดสะสม Vault (35%) ใน Rank 4 ถึง 27 ทั้งหมด
-  let newExtraIdPool = 0;
+  let newExtraIdPool = Math.max(0, Number(extraLeftVaultBonus || 0));
   if (safeRank === 27) {
     for (let r = 4; r <= 27; r++) {
       newExtraIdPool += Number(vaultByRank[r] || 0);
@@ -93,7 +96,7 @@ export function calculateMainIdVaultPools(
     }
   }
 
-  let totalAccumulatedVault = 0;
+  let totalAccumulatedVault = Math.max(0, Number(extraLeftVaultBonus || 0));
   for (let r = 1; r <= 27; r++) {
     totalAccumulatedVault += Number(vaultByRank[r] || 0);
   }

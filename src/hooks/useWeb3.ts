@@ -33,7 +33,7 @@ declare global {
 const readOnlyBscProvider = new ethers.JsonRpcProvider(
   BSC_TESTNET_RPC,
   { chainId: BSC_TESTNET_CHAIN_ID, name: 'bnbt' },
-  { staticNetwork: true, polling: true, pollingInterval: 15000, batchMaxCount: 1 }
+  { staticNetwork: true, polling: false, batchMaxCount: 1 }
 );
 readOnlyBscProvider.on('error', () => {});
 
@@ -808,6 +808,17 @@ export function useWeb3() {
     return null;
   };
 
+  // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+  const sleepPlacementDelay = async (actionLabel = 'การวางตำแหน่ง') => {
+    for (let sec = 5; sec >= 1; sec--) {
+      setTxState((prev) => ({
+        ...prev,
+        step: `ดำเนินการ${actionLabel}สำเร็จแล้ว! กำลังหน่วงเวลาประมวลผลข้อมูลผัง ${sec} วินาที...`,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  };
+
   // 1. Single Register with Automatic Placement Finder & FIFO Queue Lock (5 USDT - Rank 1)
   const handleRegister = async (
     sponsorNodeId: number,
@@ -1003,6 +1014,9 @@ export function useWeb3() {
 
       const receipt = await regTx.wait();
 
+      // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+      await sleepPlacementDelay('วางตำแหน่ง');
+
       // Confirm ticket reservation in Queue
       if (activeTicket?.ticketId) {
         await confirmQueueTicket(activeTicket.ticketId, receipt.hash);
@@ -1127,6 +1141,9 @@ export function useWeb3() {
       }));
 
       const receipt = await batchTx.wait();
+
+      // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+      await sleepPlacementDelay('วางตำแหน่งกลุ่ม');
 
       setTxState({
         isLoading: false,
@@ -1311,6 +1328,9 @@ export function useWeb3() {
 
           const receipt = await upgradeTx.wait();
 
+          // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+          await sleepPlacementDelay(`วางตำแหน่งอัปเกรดสู่แรงค์ ${targetRank}`);
+
           setTxState({
             isLoading: false,
             step: 'สำเร็จ!',
@@ -1441,6 +1461,9 @@ export function useWeb3() {
       }));
 
       const receipt = await tx.wait();
+
+      // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+      await sleepPlacementDelay('วางตำแหน่ง Auto New Main ID');
       const totalAfter = Number(await matrixContract.totalNodesInRank(1).catch(() => BigInt(totalBefore)));
       const createdNodesCount = Math.max(0, totalAfter - totalBefore);
 
@@ -1522,6 +1545,9 @@ export function useWeb3() {
         }));
 
         receipt = await tx.wait();
+
+        // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+        await sleepPlacementDelay('วางตำแหน่ง Auto Extra ID');
         const totalAfter = Number(await matrixContract.totalNodesInRank(currentRank).catch(() => BigInt(totalBefore)));
         createdNodesCount = Math.max(0, totalAfter - totalBefore);
       } catch (chainErr) {
@@ -1627,6 +1653,9 @@ export function useWeb3() {
       );
 
       if (result.success) {
+        // หน่วงเวลา (Sleep) 5 วินาที ทุกครั้งที่มีการวางตำแหน่ง เพื่อให้บล็อกเชนและระบบประมวลผลข้อมูลเสร็จสมบูรณ์
+        await sleepPlacementDelay('วางตำแหน่งชุดโหนด');
+
         if (activeBatchTicket?.ticketId) {
           await confirmQueueTicket(activeBatchTicket.ticketId, result.txHash);
         }

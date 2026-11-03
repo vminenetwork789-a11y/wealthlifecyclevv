@@ -125,7 +125,7 @@ export const RegisterSection: React.FC<RegisterSectionProps> = ({
 
   useEffect(() => {
     fetchQueueData();
-    const interval = setInterval(fetchQueueData, 3000);
+    const interval = setInterval(fetchQueueData, 8000);
     return () => clearInterval(interval);
   }, [fetchQueueData, txSuccess]);
 

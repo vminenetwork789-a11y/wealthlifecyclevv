@@ -85,6 +85,8 @@ const RPC_ENDPOINTS = [
   ...BSC_TESTNET_PARAMS.rpcUrls.filter((u) => u !== BSC_TESTNET_RPC),
 ];
 
+let cachedSimulatorProvider: ethers.JsonRpcProvider | null = null;
+
 async function getWorkingReadProvider(
   preferred?: ethers.Provider | ethers.Signer | null
 ): Promise<ethers.Provider> {
@@ -97,15 +99,20 @@ async function getWorkingReadProvider(
     }
   }
 
+  if (cachedSimulatorProvider) {
+    return cachedSimulatorProvider;
+  }
+
   for (const rpcUrl of RPC_ENDPOINTS) {
     try {
       const p = new ethers.JsonRpcProvider(
         rpcUrl,
         { chainId: 97, name: 'bnbt' },
-        { staticNetwork: true, polling: true, pollingInterval: 15000, batchMaxCount: 1 }
+        { staticNetwork: true, polling: false, batchMaxCount: 1 }
       );
       p.on('error', () => {});
       await p.getBlockNumber();
+      cachedSimulatorProvider = p;
       return p;
     } catch {
       continue;
@@ -115,9 +122,10 @@ async function getWorkingReadProvider(
   const fallback = new ethers.JsonRpcProvider(
     BSC_TESTNET_RPC,
     { chainId: 97, name: 'bnbt' },
-    { staticNetwork: true, polling: true, pollingInterval: 15000, batchMaxCount: 1 }
+    { staticNetwork: true, polling: false, batchMaxCount: 1 }
   );
   fallback.on('error', () => {});
+  cachedSimulatorProvider = fallback;
   return fallback;
 }
 

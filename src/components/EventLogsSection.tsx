@@ -33,13 +33,19 @@ const FALLBACK_RPCS = [
   'https://bsc-testnet.bnbchain.org',
 ];
 
+const cachedEventLogsProviders = new Map<string, ethers.JsonRpcProvider>();
+
 function createBscReadProvider(rpcUrl = BSC_TESTNET_RPC) {
-  const provider = new ethers.JsonRpcProvider(
-    rpcUrl,
-    { chainId: BSC_TESTNET_CHAIN_ID, name: 'bnbt' },
-    { staticNetwork: true, polling: true, pollingInterval: 15000, batchMaxCount: 1 }
-  );
-  provider.on('error', () => {});
+  let provider = cachedEventLogsProviders.get(rpcUrl);
+  if (!provider) {
+    provider = new ethers.JsonRpcProvider(
+      rpcUrl,
+      { chainId: BSC_TESTNET_CHAIN_ID, name: 'bnbt' },
+      { staticNetwork: true, polling: false, batchMaxCount: 1 }
+    );
+    provider.on('error', () => {});
+    cachedEventLogsProviders.set(rpcUrl, provider);
+  }
   return provider;
 }
 
@@ -163,8 +169,10 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
     []
   );
 
-  const fetchOnChainRewardEvents = useCallback(async (forceSync = false) => {
-    setIsRefreshing(true);
+  const fetchOnChainRewardEvents = useCallback(async (forceSync = false, silent = false) => {
+    if (!silent) {
+      setIsRefreshing(true);
+    }
 
     // 1. อ่านข้อมูลประวัติราย ID + ประวัติการกระจายรางวัล + ประวัติการอัพแรงค์จาก Database ของเราเป็นหลัก
     try {
@@ -548,10 +556,10 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
 
   // ดึงข้อมูลจาก Database ของเราเป็นหลัก + อัปเดตอัตโนมัติเมื่อมีธุรกรรมใหม่
   useEffect(() => {
-    fetchOnChainRewardEvents(false);
+    fetchOnChainRewardEvents(false, false);
 
     const handleTreeRefresh = () => {
-      fetchOnChainRewardEvents(false);
+      fetchOnChainRewardEvents(false, true);
     };
 
     if (typeof window !== 'undefined') {
@@ -559,8 +567,8 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
     }
 
     const interval = setInterval(() => {
-      fetchOnChainRewardEvents(false);
-    }, 8000);
+      fetchOnChainRewardEvents(false, true);
+    }, 15000);
 
     return () => {
       clearInterval(interval);

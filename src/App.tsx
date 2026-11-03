@@ -6,10 +6,11 @@ import { RegisterSection } from './components/RegisterSection';
 import { UpgradeRankSection } from './components/UpgradeRankSection';
 import { RankInspectorAndAdminPanel } from './components/RankInspectorAndAdminPanel';
 import { MatrixTreeVisualizer } from './components/MatrixTreeVisualizer';
-import { EventLogsSection } from './components/EventLogsSection';
 import { FAQSection } from './components/FAQSection';
 import { DeployContractModal } from './components/DeployContractModal';
 import { AuthAndOnboardingGate } from './components/AuthAndOnboardingGate';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { EarningsCalculator } from './components/EarningsCalculator';
 import { CONTRACT_ADDRESS, USDT_ADDRESS } from './contracts/config';
 import { AlertCircle, CheckCircle2, Loader2, X, ExternalLink, LogIn } from 'lucide-react';
 import { calculateMainIdVaultPools } from './utils/vaultPools';
@@ -98,6 +99,7 @@ export default function App() {
 
   const [mainIdVaultsOnChain, setMainIdVaultsOnChain] = useState<Record<number, number>>({});
   const [selectedMainIdRankOnChain, setSelectedMainIdRankOnChain] = useState<number | null>(null);
+  const [selectedMainIdExtraLeftBonus, setSelectedMainIdExtraLeftBonus] = useState<number>(0);
 
   useEffect(() => {
     const mId = Number(selectedMainId);
@@ -105,11 +107,15 @@ export default function App() {
 
     let isMounted = true;
     const fetchMainIdVaultsFromDB = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
       try {
         // 1. Read directly from our backend Database API (/api/matrix/main-id/:mainId)
         const dbRes = await fetch(`/api/matrix/main-id/${mId}`, {
           headers: { Accept: 'application/json' },
+          signal: controller.signal,
         });
+        clearTimeout(timeoutId);
         if (dbRes.ok) {
           const dbData = await dbRes.json();
           if (dbData?.success && dbData.vaultsByRank) {
@@ -118,14 +124,32 @@ export default function App() {
               resultMap[r] = Number(dbData.vaultsByRank[r] ?? 0);
             }
             if (isMounted) {
-              setMainIdVaultsOnChain(resultMap);
-              setSelectedMainIdRankOnChain(Number(dbData.currentRank || 1));
+              setMainIdVaultsOnChain((prev) => {
+                const changed = Object.keys(resultMap).some(
+                  (k) => prev[Number(k)] !== resultMap[Number(k)]
+                );
+                return changed || Object.keys(prev).length === 0 ? resultMap : prev;
+              });
+              const nextR = Number(dbData.currentRank || 1);
+              setSelectedMainIdRankOnChain((prev) => (prev === nextR ? prev : nextR));
+              const nextBonus = Number(dbData.extraLeftVaultBonus || 0);
+              setSelectedMainIdExtraLeftBonus((prev) => (prev === nextBonus ? prev : nextBonus));
             }
             return;
           }
         }
-      } catch (err) {
-        console.warn('Notice fetching mainIdVaults from Database API:', err);
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        // Fallback to profile vaults gracefully if transient offline / network issue occurs
+        if (err?.name !== 'AbortError' && isMounted) {
+          if (Array.isArray(profile?.vaults) && profile.vaults.length > 0) {
+            const fallbackMap: Record<number, number> = {};
+            profile.vaults.forEach((v: any) => {
+              fallbackMap[Number(v.rank)] = parseFloat(v.balance || '0');
+            });
+            setMainIdVaultsOnChain((prev) => Object.keys(prev).length === 0 ? fallbackMap : prev);
+          }
+        }
       }
     };
 
@@ -136,7 +160,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       window.addEventListener('matrix:tree:refresh', handleTreeRefresh);
     }
-    const interval = setInterval(fetchMainIdVaultsFromDB, 6000);
+    const interval = setInterval(fetchMainIdVaultsFromDB, 12000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -144,7 +168,7 @@ export default function App() {
         window.removeEventListener('matrix:tree:refresh', handleTreeRefresh);
       }
     };
-  }, [selectedMainId, contractAddress, account, profile?.mainNodeIdRank1, profile?.currentMaxRank]);
+  }, [selectedMainId, contractAddress, account, profile?.mainNodeIdRank1, profile?.currentMaxRank, profile?.vaults]);
 
   const vaultByRank = React.useMemo(() => {
     const map: Record<number, number> = {};
@@ -168,8 +192,15 @@ export default function App() {
     const isPrimaryMain =
       !profile?.mainNodeIdRank1 || String(profile.mainNodeIdRank1) === String(selectedMainId);
     const currentR = selectedMainIdRankOnChain ?? (isPrimaryMain ? (profile?.currentMaxRank || 1) : 1);
-    return calculateMainIdVaultPools(mIdNum, currentR, vaultByRank);
-  }, [selectedMainId, selectedMainIdRankOnChain, profile?.mainNodeIdRank1, profile?.currentMaxRank, vaultByRank]);
+    return calculateMainIdVaultPools(mIdNum, currentR, vaultByRank, selectedMainIdExtraLeftBonus);
+  }, [
+    selectedMainId,
+    selectedMainIdRankOnChain,
+    selectedMainIdExtraLeftBonus,
+    profile?.mainNodeIdRank1,
+    profile?.currentMaxRank,
+    vaultByRank,
+  ]);
 
   const handleFullLogout = () => {
     setBypassGateToDashboard(false);
@@ -180,132 +211,140 @@ export default function App() {
   if (!bypassGateToDashboard) {
     if (!account) {
       return (
-        <AuthAndOnboardingGate
-          mode="login"
-          language={language}
-          onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
-          account={account}
-          detectedBrowserWallet={detectedBrowserWallet}
-          chainId={chainId}
-          isBscTestnet={isBscTestnet}
-          isConnecting={isConnecting}
-          isLoadingProfile={isLoadingProfile}
-          profile={profile}
-          usdtBalance={usdtBalance}
-          bnbBalance={bnbBalance}
-          allowance={allowance}
-          contractAddress={contractAddress || CONTRACT_ADDRESS}
-          usdtAddress={usdtAddress || USDT_ADDRESS}
-          txState={txState}
-          onClearTxState={clearTxState}
-          onConnectWallet={connectWallet}
-          onLoginCustomInput={loginWithCustomInput}
-          onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
-          onDisconnect={handleFullLogout}
-          onSwitchNetwork={switchToBscTestnet}
-          onRefresh={refreshUserData}
-          onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
-          onApproveUsdt={handleApproveUsdt}
-          onRegister={handleRegister}
-          onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
-          onCheckSponsor={checkSponsorNode}
-          onPreviewPlacement={previewNextPlacement}
-          onUpgradeToRank={handleUpgradeRank}
-        />
+        <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในหน้าเข้าสู่ระบบ">
+          <AuthAndOnboardingGate
+            mode="login"
+            language={language}
+            onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
+            account={account}
+            detectedBrowserWallet={detectedBrowserWallet}
+            chainId={chainId}
+            isBscTestnet={isBscTestnet}
+            isConnecting={isConnecting}
+            isLoadingProfile={isLoadingProfile}
+            profile={profile}
+            usdtBalance={usdtBalance}
+            bnbBalance={bnbBalance}
+            allowance={allowance}
+            contractAddress={contractAddress || CONTRACT_ADDRESS}
+            usdtAddress={usdtAddress || USDT_ADDRESS}
+            txState={txState}
+            onClearTxState={clearTxState}
+            onConnectWallet={connectWallet}
+            onLoginCustomInput={loginWithCustomInput}
+            onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
+            onDisconnect={handleFullLogout}
+            onSwitchNetwork={switchToBscTestnet}
+            onRefresh={refreshUserData}
+            onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
+            onApproveUsdt={handleApproveUsdt}
+            onRegister={handleRegister}
+            onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
+            onCheckSponsor={checkSponsorNode}
+            onPreviewPlacement={previewNextPlacement}
+            onUpgradeToRank={handleUpgradeRank}
+          />
+        </ErrorBoundary>
       );
     }
 
     if (isLoadingProfile && !profile) {
       return (
-        <AuthAndOnboardingGate
-          mode="Checking"
-          language={language}
-          onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
-          account={account}
-          detectedBrowserWallet={detectedBrowserWallet}
-          chainId={chainId}
-          isBscTestnet={isBscTestnet}
-          isConnecting={isConnecting}
-          isLoadingProfile={isLoadingProfile}
-          profile={profile}
-          usdtBalance={usdtBalance}
-          bnbBalance={bnbBalance}
-          allowance={allowance}
-          contractAddress={contractAddress || CONTRACT_ADDRESS}
-          usdtAddress={usdtAddress || USDT_ADDRESS}
-          txState={txState}
-          onClearTxState={clearTxState}
-          onConnectWallet={connectWallet}
-          onLoginCustomInput={loginWithCustomInput}
-          onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
-          onDisconnect={handleFullLogout}
-          onSwitchNetwork={switchToBscTestnet}
-          onRefresh={refreshUserData}
-          onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
-          onApproveUsdt={handleApproveUsdt}
-          onRegister={handleRegister}
-          onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
-          onCheckSponsor={checkSponsorNode}
-          onPreviewPlacement={previewNextPlacement}
-          onUpgradeToRank={handleUpgradeRank}
-        />
+        <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในการโหลดโปรไฟล์">
+          <AuthAndOnboardingGate
+            mode="Checking"
+            language={language}
+            onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
+            account={account}
+            detectedBrowserWallet={detectedBrowserWallet}
+            chainId={chainId}
+            isBscTestnet={isBscTestnet}
+            isConnecting={isConnecting}
+            isLoadingProfile={isLoadingProfile}
+            profile={profile}
+            usdtBalance={usdtBalance}
+            bnbBalance={bnbBalance}
+            allowance={allowance}
+            contractAddress={contractAddress || CONTRACT_ADDRESS}
+            usdtAddress={usdtAddress || USDT_ADDRESS}
+            txState={txState}
+            onClearTxState={clearTxState}
+            onConnectWallet={connectWallet}
+            onLoginCustomInput={loginWithCustomInput}
+            onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
+            onDisconnect={handleFullLogout}
+            onSwitchNetwork={switchToBscTestnet}
+            onRefresh={refreshUserData}
+            onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
+            onApproveUsdt={handleApproveUsdt}
+            onRegister={handleRegister}
+            onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
+            onCheckSponsor={checkSponsorNode}
+            onPreviewPlacement={previewNextPlacement}
+            onUpgradeToRank={handleUpgradeRank}
+          />
+        </ErrorBoundary>
       );
     }
 
     if (!isLoadingProfile && !isWalletRegistered) {
       return (
-        <AuthAndOnboardingGate
-          mode="register_onboarding"
-          language={language}
-          onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
-          account={account}
-          detectedBrowserWallet={detectedBrowserWallet}
-          chainId={chainId}
-          isBscTestnet={isBscTestnet}
-          isConnecting={isConnecting}
-          isLoadingProfile={isLoadingProfile}
-          profile={profile}
-          usdtBalance={usdtBalance}
-          bnbBalance={bnbBalance}
-          allowance={allowance}
-          contractAddress={contractAddress || CONTRACT_ADDRESS}
-          usdtAddress={usdtAddress || USDT_ADDRESS}
-          txState={txState}
-          onClearTxState={clearTxState}
-          onConnectWallet={connectWallet}
-          onLoginCustomInput={loginWithCustomInput}
-          onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
-          onDisconnect={handleFullLogout}
-          onSwitchNetwork={switchToBscTestnet}
-          onRefresh={refreshUserData}
-          onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
-          onApproveUsdt={handleApproveUsdt}
-          onRegister={handleRegister}
-          onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
-          onCheckSponsor={checkSponsorNode}
-          onPreviewPlacement={previewNextPlacement}
-          onUpgradeToRank={handleUpgradeRank}
-        />
+        <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในหน้าสมัครสมาชิก">
+          <AuthAndOnboardingGate
+            mode="register_onboarding"
+            language={language}
+            onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
+            account={account}
+            detectedBrowserWallet={detectedBrowserWallet}
+            chainId={chainId}
+            isBscTestnet={isBscTestnet}
+            isConnecting={isConnecting}
+            isLoadingProfile={isLoadingProfile}
+            profile={profile}
+            usdtBalance={usdtBalance}
+            bnbBalance={bnbBalance}
+            allowance={allowance}
+            contractAddress={contractAddress || CONTRACT_ADDRESS}
+            usdtAddress={usdtAddress || USDT_ADDRESS}
+            txState={txState}
+            onClearTxState={clearTxState}
+            onConnectWallet={connectWallet}
+            onLoginCustomInput={loginWithCustomInput}
+            onLoginDemoUnregisteredWallet={loginWithDemoUnregisteredWallet}
+            onDisconnect={handleFullLogout}
+            onSwitchNetwork={switchToBscTestnet}
+            onRefresh={refreshUserData}
+            onEnterGuestDashboard={() => setBypassGateToDashboard(true)}
+            onApproveUsdt={handleApproveUsdt}
+            onRegister={handleRegister}
+            onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
+            onCheckSponsor={checkSponsorNode}
+            onPreviewPlacement={previewNextPlacement}
+            onUpgradeToRank={handleUpgradeRank}
+          />
+        </ErrorBoundary>
       );
     }
   }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-emerald-500/30 selection:text-emerald-200">
-      <Header
-        account={account}
-        chainId={chainId}
-        isBscTestnet={isBscTestnet}
-        isConnecting={isConnecting}
-        onConnect={connectWallet}
-        onDisconnect={handleFullLogout}
-        onSwitchNetwork={switchToBscTestnet}
-        onRefresh={refreshUserData}
-        language={language}
-        onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
-        onOpenDeployModal={() => setIsDeployModalOpen(true)}
-        contractAddress={contractAddress}
-      />
+      <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในส่วนแถบเมนูด้านบน (Header Error)">
+        <Header
+          account={account}
+          chainId={chainId}
+          isBscTestnet={isBscTestnet}
+          isConnecting={isConnecting}
+          onConnect={connectWallet}
+          onDisconnect={handleFullLogout}
+          onSwitchNetwork={switchToBscTestnet}
+          onRefresh={refreshUserData}
+          language={language}
+          onToggleLanguage={() => setLanguage(language === 'th' ? 'en' : 'th')}
+          onOpenDeployModal={() => setIsDeployModalOpen(true)}
+          contractAddress={contractAddress}
+        />
+      </ErrorBoundary>
 
       {/* Quick Banner when browsing in Guest / Bypass mode */}
       {(!account || !isWalletRegistered) && (
@@ -395,25 +434,35 @@ export default function App() {
           </div>
         )}
 
-        {/* Binary Matrix Tree Visualizer */}
-        <MatrixTreeVisualizer
-          language={language}
-          userAddress={account}
-          chainId={chainId}
-          isBscTestnet={isBscTestnet}
-          contractAddress={contractAddress}
-          usdtBalance={usdtBalance}
-          allowance={allowance}
-          onConnectWallet={connectWallet}
-          onSwitchNetwork={switchToBscTestnet}
-          onApproveUsdt={handleApproveUsdt}
-          onRegisterWithSponsor={handleRegister}
-          onUpgradeToRank={handleUpgradeRank}
-          onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
-          currentUserRank={profile?.currentMaxRank || 1}
-          lastTxSuccess={txState.successMessage}
-          refreshTrigger={txState.successMessage}
-        />
+        {/* Projected Earnings Calculator */}
+        <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในเครื่องคำนวณรายได้">
+          <EarningsCalculator
+            language={language}
+            currentMaxRank={profile?.currentMaxRank || 1}
+          />
+        </ErrorBoundary>
+
+        {/* Binary Tree Visualizer */}
+        <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในส่วนแสดงผลผังเมทริกซ์ (Tree Visualizer Error)">
+          <MatrixTreeVisualizer
+            language={language}
+            userAddress={account}
+            chainId={chainId}
+            isBscTestnet={isBscTestnet}
+            contractAddress={contractAddress}
+            usdtBalance={usdtBalance}
+            allowance={allowance}
+            onConnectWallet={connectWallet}
+            onSwitchNetwork={switchToBscTestnet}
+            onApproveUsdt={handleApproveUsdt}
+            onRegisterWithSponsor={handleRegister}
+            onUpgradeToRank={handleUpgradeRank}
+            onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
+            currentUserRank={profile?.currentMaxRank || 1}
+            lastTxSuccess={txState.successMessage}
+            refreshTrigger={txState.successMessage}
+          />
+        </ErrorBoundary>
       </main>
 
       {/* Registration Popup Modal opened from Dashboard Status Widget / Summary Pill */}
@@ -434,35 +483,39 @@ export default function App() {
             >
               <X className="w-4 h-4" />
             </button>
-            <RegisterSection
-              account={account}
-              isRegistered={profile?.isRegistered ?? false}
-              mainNodeIdRank1={profile?.mainNodeIdRank1}
-              usdtBalance={usdtBalance}
-              allowance={allowance}
-              onConnectWallet={connectWallet}
-              onApproveUsdt={handleApproveUsdt}
-              onRegister={handleRegister}
-              onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
-              onCheckSponsor={checkSponsorNode}
-              onPreviewPlacement={previewNextPlacement}
-              isLoading={txState.isLoading}
-              currentStep={txState.step}
-              txError={txState.error}
-              txSuccess={txState.successMessage}
-              language={language}
-            />
+            <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในฟอร์มสมัครสมาชิก">
+              <RegisterSection
+                account={account}
+                isRegistered={profile?.isRegistered ?? false}
+                mainNodeIdRank1={profile?.mainNodeIdRank1}
+                usdtBalance={usdtBalance}
+                allowance={allowance}
+                onConnectWallet={connectWallet}
+                onApproveUsdt={handleApproveUsdt}
+                onRegister={handleRegister}
+                onExecuteOffChainBatch={handleExecuteOffChainSimulationAndBatch}
+                onCheckSponsor={checkSponsorNode}
+                onPreviewPlacement={previewNextPlacement}
+                isLoading={txState.isLoading}
+                currentStep={txState.step}
+                txError={txState.error}
+                txSuccess={txState.successMessage}
+                language={language}
+              />
+            </ErrorBoundary>
           </div>
         </div>
       )}
 
-      <DeployContractModal
-        isOpen={isDeployModalOpen}
-        onClose={() => setIsDeployModalOpen(false)}
-        language={language}
-        account={account}
-        onUpdateContractAddress={updateSmartContractAddress}
-      />
+      <ErrorBoundary fallbackTitle="เกิดข้อผิดพลาดในหน้าต่างจัดการสัญญา">
+        <DeployContractModal
+          isOpen={isDeployModalOpen}
+          onClose={() => setIsDeployModalOpen(false)}
+          language={language}
+          account={account}
+          onUpdateContractAddress={updateSmartContractAddress}
+        />
+      </ErrorBoundary>
     </div>
   );
 }
